@@ -119,9 +119,12 @@
             <h3>自动提取格式规则</h3>
             <button id="response_refiner_extract_close" type="button" class="menu_button response-refiner-menu-button"><i class="fa-solid fa-xmark"></i><span>关闭</span></button>
         </div>
-        <div class="response-refiner-note marginBot8">粘贴一段完整回复后，脚本会先提取成对标签，再让 AI 一次性为每个标签生成规则名、标签内提示词和模板。确认后会追加到现有规则列表。</div>
+        <div class="response-refiner-note marginBot8">粘贴一段完整回复后，脚本会先提取成对标签，再让 AI 一次性为每个普通标签生成规则名、标签内提示词和模板。若思维链内部包含其他标签块，请填写下方思维链捕获正则；只有填写后才会额外生成思维链规则。</div>
         <label for="response_refiner_extract_source">完整回复样例</label>
         <textarea id="response_refiner_extract_source" class="text_pole marginBot8" rows="10" placeholder="在这里粘贴完整回复"></textarea>
+        <label for="response_refiner_extract_chain_regex">思维链捕获正则（可选）</label>
+        <input id="response_refiner_extract_chain_regex" class="text_pole marginBot8" type="text" placeholder="例如: /([\s\S]*)<\/think>/g 或 <think>([\s\S]*?)<\/think>" />
+        <div class="response-refiner-note marginBot8">留空时不会生成思维链规则，避免误把正文开头内容捕获为思维链。</div>
         <div class="response-refiner-button-row marginBot8">
             <button id="response_refiner_extract_run" type="button" class="menu_button response-refiner-menu-button"><i class="fa-solid fa-wand-magic-sparkles"></i><span>提取并生成规则</span></button>
             <button id="response_refiner_extract_apply" type="button" class="menu_button response-refiner-menu-button" disabled><i class="fa-solid fa-check"></i><span>追加到规则列表</span></button>

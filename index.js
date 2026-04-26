@@ -564,13 +564,19 @@ function isStartAnchoredRule(rule) {
     return String(rule?.startTag || "") === START_OF_TEXT_TAG || Boolean(rule?.startAnchored);
 }
 
+function isStartOnlyAnchoredRule(rule) {
+    return isStartAnchoredRule(rule) && (!rule?.realStartTag || String(rule.realStartTag || "") === START_OF_TEXT_TAG);
+}
+
 function getRuleStartLabel(rule) {
-    return isStartAnchoredRule(rule) ? START_OF_TEXT_LABEL : String(rule?.startTag || "");
+    if (isStartOnlyAnchoredRule(rule)) return START_OF_TEXT_LABEL;
+    if (isStartAnchoredRule(rule) && rule.realStartTag) return String(rule.realStartTag);
+    return String(rule?.startTag || "");
 }
 
 function getEnabledFormatRules(settings) {
     return (settings.formatRules || [])
-        .filter(rule => rule && rule.enabled && (rule.startTag || isStartAnchoredRule(rule)) && rule.endTag)
+        .filter(rule => rule && rule.enabled && (rule.startTag || rule.realStartTag || isStartAnchoredRule(rule)) && rule.endTag)
         .map((rule, index) => ({ ...rule, order: index + 1 }));
 }
 
@@ -601,19 +607,26 @@ function escapeRegExp(value) {
 function extractTaggedSegments(text, rules) {
     const source = String(text || "");
     return rules.map(rule => {
-        const start = String(rule.startTag || "");
+        const start = String(rule.realStartTag || rule.startTag || "");
         const end = String(rule.endTag || "");
-        if (!end || (!start && !isStartAnchoredRule(rule))) {
+        if (!end) {
             return { rule, key: getRuleKey(rule), content: "", found: false };
         }
         const regex = isStartAnchoredRule(rule)
-            ? new RegExp(`^([\\s\\S]*?)${escapeRegExp(end)}`)
-            : new RegExp(`${escapeRegExp(start)}([\\s\\S]*?)${escapeRegExp(end)}`, "g");
+            ? (rule.realStartTag && rule.realStartTag !== START_OF_TEXT_TAG
+                ? new RegExp(`${escapeRegExp(rule.realStartTag)}([\\s\\S]*?)${escapeRegExp(end)}`, "g")
+                : new RegExp(`^([\\s\\S]*?)${escapeRegExp(end)}`))
+            : (start ? new RegExp(`${escapeRegExp(start)}([\\s\\S]*?)${escapeRegExp(end)}`, "g") : null);
+        if (!regex) {
+            return { rule, key: getRuleKey(rule), content: "", found: false };
+        }
         const matches = [];
         let match;
+        let guard = 0;
         while ((match = regex.exec(source)) !== null) {
             matches.push(match[1] || "");
             if (match[0] === "") regex.lastIndex++;
+            if (++guard > 10000) break;
         }
         return { rule, key: getRuleKey(rule), content: matches.length ? matches[matches.length - 1] : "", found: matches.length > 0 };
     });
@@ -1706,21 +1719,6 @@ function extractTagPairsFromSample(text) {
     const source = String(text || "");
     const pairs = [];
     const seen = new Set();
-    const firstEnd = source.match(/<\/([a-zA-Z][\w:-]*)>/);
-    const firstStart = source.match(/<([a-zA-Z][\w:-]*)\b[^>]*>/);
-    if (firstEnd && (!firstStart || firstEnd.index <= firstStart.index) && firstEnd.index > 0) {
-        const tag = firstEnd[1];
-        const endTag = `</${tag}>`;
-        seen.add(`anchored:${tag}`);
-        pairs.push({
-            tag,
-            startTag: START_OF_TEXT_TAG,
-            endTag,
-            content: source.slice(0, firstEnd.index),
-            startAnchored: true,
-            forceTop: true,
-        });
-    }
 
     const tagRegex = /<([a-zA-Z][\w:-]*)\b[^>]*>([\s\S]*?)<\/\1>/g;
     let match;
@@ -1752,19 +1750,47 @@ function makeRuleId() {
     return crypto?.randomUUID ? crypto.randomUUID() : String(Date.now() + Math.random());
 }
 
+function extractChainPairFromSample(text, regexText) {
+    const pattern = String(regexText || "").trim();
+    if (!pattern) return null;
+    const source = String(text || "");
+    const content = extractChainContext(source, pattern);
+    if (!content) return null;
+    const decodedPattern = unescapeHtmlEntities(pattern);
+    const endTagMatch = decodedPattern.match(/<\\?\/([a-zA-Z][\w:-]*)>/) || decodedPattern.match(/<\/([a-zA-Z][\w:-]*)>/);
+    const startTagMatch = decodedPattern.match(/<([a-zA-Z][\w:-]*)\b[^>]*>/);
+    const tag = endTagMatch?.[1] || startTagMatch?.[1] || "think";
+    return {
+        tag,
+        startTag: startTagMatch ? `<${startTagMatch[1]}>` : START_OF_TEXT_TAG,
+        realStartTag: startTagMatch ? `<${startTagMatch[1]}>` : START_OF_TEXT_TAG,
+        endTag: endTagMatch ? `</${endTagMatch[1]}>` : `</${tag}>`,
+        content,
+        startAnchored: !startTagMatch,
+        forceTop: !startTagMatch,
+        sourceRegex: pattern,
+    };
+}
+
 function createAnchoredRuleFromPair(pair) {
     const endTag = String(pair.endTag || "");
+    const realStartTag = String(pair.realStartTag || pair.startTag || START_OF_TEXT_TAG);
     const tag = String(pair.tag || endTag.replace(/^<\//, "").replace(/>$/, "") || "特殊块");
+    const startOnly = !realStartTag || realStartTag === START_OF_TEXT_TAG;
     return {
         id: makeRuleId(),
         enabled: true,
-        name: `${tag} 开头块`,
-        startTag: START_OF_TEXT_TAG,
+        name: startOnly ? `${tag} 文本起点块` : `${tag} 思维链`,
+        startTag: startOnly ? START_OF_TEXT_TAG : realStartTag,
+        realStartTag: startOnly ? START_OF_TEXT_TAG : realStartTag,
         endTag,
-        prompt: `这是从回复开头开始、到 ${endTag} 结束的特殊块；需要保持内容完整、连贯，并保留结束标签。`,
-        template: `这里填写${tag}内容\n${endTag}`,
-        startAnchored: true,
-        forceTop: true,
+        prompt: startOnly
+            ? `这是从回复文本起点开始、到 ${endTag} 结束的思维链特殊块；需要保持内容完整、连贯，并保留结束标签。`
+            : `这是 ${realStartTag} 到 ${endTag} 内部的思维链块；需要保持内容完整、连贯，并保留成对标签。`,
+        template: startOnly ? `这里填写${tag}内容\n${endTag}` : `${realStartTag}\n这里填写${tag}内容\n${endTag}`,
+        startAnchored: startOnly,
+        forceTop: startOnly,
+        sourceRegex: pair.sourceRegex || "",
     };
 }
 
@@ -1798,13 +1824,15 @@ function normalizeExtractedRules(text, fixedRules = []) {
 
 async function runExtractRules() {
     const sample = String($("#response_refiner_extract_source").val() || "");
-    const pairs = extractTagPairsFromSample(sample);
+    const chainRegex = String($("#response_refiner_extract_chain_regex").val() || "").trim();
+    const normalPairs = extractTagPairsFromSample(sample);
+    const chainPair = extractChainPairFromSample(sample, chainRegex);
+    const pairs = chainPair ? [chainPair, ...normalPairs] : normalPairs;
     if (!pairs.length) {
-        toastr.warning("未在样例中找到可提取标签或开头特殊块", "自动提取格式规则");
+        toastr.warning("未在样例中找到可提取标签；如需提取无开始标签的思维链，请填写思维链捕获正则", "自动提取格式规则");
         return;
     }
-    const anchoredPairs = pairs.filter(pair => pair.startAnchored || pair.startTag === START_OF_TEXT_TAG);
-    const normalPairs = pairs.filter(pair => !(pair.startAnchored || pair.startTag === START_OF_TEXT_TAG));
+    const anchoredPairs = chainPair ? [chainPair] : [];
     const fixedRules = anchoredPairs.map(createAnchoredRuleFromPair);
     const extractMessages = normalPairs.length ? buildExtractRulesMessages(sample, normalPairs) : [];
     console.group("[Response Refiner][Debug] 自动提取格式规则");
@@ -1949,16 +1977,17 @@ function renderFormatRules() {
         const $name = $("<input>", { class: "text_pole response-refiner-rule-name", type: "text", title: "规则名" }).val(rule.name || `规则 ${index + 1}`).prop("disabled", isBodyRule);
         $title.append($toggle, $enabled, $name);
         const $actions = $("<div>", { class: "response-refiner-rule-actions" });
-        $actions.append($("<button>", { type: "button", class: "menu_button response-refiner-rule-up", text: "上移" }));
-        $actions.append($("<button>", { type: "button", class: "menu_button response-refiner-rule-down", text: "下移" }));
+        const lockPosition = isStartOnlyAnchoredRule(rule);
+        $actions.append($("<button>", { type: "button", class: "menu_button response-refiner-rule-up", text: "上移", disabled: lockPosition }));
+        $actions.append($("<button>", { type: "button", class: "menu_button response-refiner-rule-down", text: "下移", disabled: lockPosition }));
         if (!isBodyRule) {
             $actions.append($("<button>", { type: "button", class: "menu_button response-refiner-rule-delete", text: "删除" }));
         }
         $header.append($title, $actions);
 
         const $body = $("<div>", { class: "response-refiner-rule-body" }).toggle(!collapsed);
-        $body.append($("<label>", { text: "开始标签" }));
-        $body.append($("<input>", { class: "text_pole response-refiner-rule-start", type: "text", placeholder: "例如: <content>" }).val(rule.startTag || "").prop("disabled", isBodyRule));
+        $body.append($("<label>", { text: isStartOnlyAnchoredRule(rule) ? "开始位置" : "开始标签" }));
+        $body.append($("<input>", { class: "text_pole response-refiner-rule-start", type: "text", placeholder: "例如: <content>" }).val(getRuleStartLabel(rule)).prop("disabled", isBodyRule || isStartOnlyAnchoredRule(rule)));
         $body.append($("<label>", { text: "结束标签" }));
         $body.append($("<input>", { class: "text_pole response-refiner-rule-end", type: "text", placeholder: "例如: </content>" }).val(rule.endTag || "").prop("disabled", isBodyRule));
         $body.append($("<label>", { text: "标签内提示词" }));
@@ -1975,16 +2004,24 @@ function syncFormatRulesFromDom() {
     settings.formatRules = [];
     $("#response_refiner_format_rules .response-refiner-rule-card").each(function () {
         const $card = $(this);
+        const existingRule = settings.formatRules[Number($card.data("index"))] || {};
+        const startOnly = isStartOnlyAnchoredRule(existingRule);
+        const startValue = String($card.find(".response-refiner-rule-start").val() || "");
         settings.formatRules.push({
             id: String($card.data("rule-id") || (crypto?.randomUUID ? crypto.randomUUID() : Date.now() + Math.random())),
             enabled: $card.find(".response-refiner-rule-enabled").prop("checked"),
             name: String($card.find(".response-refiner-rule-name").val() || ""),
-            startTag: String($card.find(".response-refiner-rule-start").val() || ""),
+            startTag: startOnly ? START_OF_TEXT_TAG : startValue,
+            realStartTag: startOnly ? START_OF_TEXT_TAG : startValue,
             endTag: String($card.find(".response-refiner-rule-end").val() || ""),
             prompt: String($card.find(".response-refiner-rule-prompt").val() || ""),
             template: String($card.find(".response-refiner-rule-template").val() || ""),
+            startAnchored: startOnly || Boolean(existingRule.startAnchored),
+            forceTop: startOnly || Boolean(existingRule.forceTop),
+            sourceRegex: String(existingRule.sourceRegex || ""),
         });
     });
+    settings.formatRules.sort((a, b) => Number(isStartOnlyAnchoredRule(b)) - Number(isStartOnlyAnchoredRule(a)));
     ensureBodyRule(settings, false);
     saveSettings();
 }
@@ -2169,7 +2206,8 @@ function bindSettings() {
     $(document).on("click", ".response-refiner-rule-up", function () {
         const index = Number($(this).closest(".response-refiner-rule-card").data("index"));
         syncFormatRulesFromDom();
-        if (index > 0) {
+        if (isStartOnlyAnchoredRule(settings.formatRules[index])) return;
+        if (index > 0 && !isStartOnlyAnchoredRule(settings.formatRules[index - 1])) {
             [settings.formatRules[index - 1], settings.formatRules[index]] = [settings.formatRules[index], settings.formatRules[index - 1]];
             saveSettings();
             renderFormatRules();
@@ -2178,8 +2216,10 @@ function bindSettings() {
     $(document).on("click", ".response-refiner-rule-down", function () {
         const index = Number($(this).closest(".response-refiner-rule-card").data("index"));
         syncFormatRulesFromDom();
+        if (isStartOnlyAnchoredRule(settings.formatRules[index])) return;
         if (index < settings.formatRules.length - 1) {
             [settings.formatRules[index + 1], settings.formatRules[index]] = [settings.formatRules[index], settings.formatRules[index + 1]];
+            settings.formatRules.sort((a, b) => Number(isStartOnlyAnchoredRule(b)) - Number(isStartOnlyAnchoredRule(a)));
             saveSettings();
             renderFormatRules();
         }
