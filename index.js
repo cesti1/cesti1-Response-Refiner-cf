@@ -412,14 +412,29 @@ function normalizeRegexFlags(flags, defaultFlags = "g") {
         .join("");
 }
 
+function unescapeHtmlEntities(text) {
+    return String(text || "")
+        .replace(/</g, "<")
+        .replace(/>/g, ">")
+        .replace(/"/g, '"')
+        .replace(/'/g, "'")
+        .replace(/&/g, "&");
+}
+
+function normalizeRegexBody(body) {
+    return String(body || "")
+        .replace(/\\\\([sSdDwWbB])/g, "\\$1")
+        .replace(/\\\\\//g, "\\/");
+}
+
 function parseUserRegex(regexText, defaultFlags = "g") {
-    const raw = String(regexText || "").trim();
+    const raw = unescapeHtmlEntities(regexText).trim();
     if (!raw) return null;
     const literal = raw.match(/^\/(.*)\/([a-z]*)$/i);
     if (literal) {
-        return new RegExp(literal[1], normalizeRegexFlags(literal[2], defaultFlags));
+        return new RegExp(normalizeRegexBody(literal[1]), normalizeRegexFlags(literal[2], defaultFlags));
     }
-    return new RegExp(raw, normalizeRegexFlags(defaultFlags, defaultFlags));
+    return new RegExp(normalizeRegexBody(raw), normalizeRegexFlags(defaultFlags, defaultFlags));
 }
 
 function isOnlyXmlLikeTag(value) {
@@ -436,27 +451,55 @@ function getPreferredRegexCapture(match) {
     return captures.length ? captures[0] : match[0];
 }
 
-function extractChainContext(text, regexText) {
+function getRegexMatches(text, regexText) {
     const pattern = String(regexText || "").trim();
     if (!pattern) {
-        return "";
+        return [];
     }
 
-    try {
-        const regex = parseUserRegex(pattern, "g");
-        if (!regex) return "";
-        const matches = [];
-        let match;
-        while ((match = regex.exec(text)) !== null) {
-            const captured = getPreferredRegexCapture(match);
-            if (String(captured || "").trim()) {
-                matches.push(captured);
-            }
-            if (match[0] === "") {
-                regex.lastIndex++;
-            }
+    const regex = parseUserRegex(pattern, "g");
+    if (!regex) return [];
+    const matches = [];
+    let match;
+    while ((match = regex.exec(text)) !== null) {
+        const captured = getPreferredRegexCapture(match);
+        if (String(captured || "").trim()) {
+            matches.push(captured);
         }
-        return matches.length ? String(matches[matches.length - 1]).trim() : "";
+        if (match[0] === "") {
+            regex.lastIndex++;
+        }
+    }
+    return matches;
+}
+
+function findStartAnchoredChainByEndTag(text, regexText) {
+    const pattern = unescapeHtmlEntities(regexText).trim();
+    const endTagMatch = pattern.match(/<\\?\/([a-zA-Z][\w:-]*)>/) || pattern.match(/<\/([a-zA-Z][\w:-]*)>/);
+    if (!endTagMatch) return "";
+    const endTag = `</${endTagMatch[1]}>`;
+    const source = String(text || "");
+    const index = source.indexOf(endTag);
+    if (index <= 0) return "";
+    return source.slice(0, index).trim();
+}
+
+function getTextMatchCandidates(text) {
+    const raw = String(text || "");
+    const htmlDecoded = unescapeHtmlEntities(raw);
+    return [...new Set([raw, htmlDecoded])];
+}
+
+function extractChainContext(text, regexText) {
+    try {
+        const matches = getTextMatchCandidates(text).flatMap(candidate => getRegexMatches(candidate, regexText));
+        if (matches.length) {
+            return String(matches[matches.length - 1]).trim();
+        }
+        const fallback = getTextMatchCandidates(text)
+            .map(candidate => findStartAnchoredChainByEndTag(candidate, regexText))
+            .find(Boolean);
+        return fallback || "";
     } catch (error) {
         console.error("[Response Refiner] 思维链捕获正则错误:", error);
         toastr.warning("思维链捕获正则错误，已仅使用上一条用户消息", "回复补完");
@@ -720,9 +763,13 @@ function buildCompletionMessages(sourceText, settings, messageId, missingRules =
         buildFormatRulesText(settings),
     ].filter(Boolean).join("\n");
 
+    const chainRegexText = String(settings.completionChainRegex || settings.completionOutlineRegex || "").trim();
+    const chainMissText = chainRegexText
+        ? `参考思维链：未匹配到，禁止自行编造思维链。\n调试信息：已使用正则 ${chainRegexText} 匹配当前 AI 回复文本，文本长度 ${String(sourceText || "").length}。`
+        : "参考思维链：未配置捕获正则，禁止自行编造思维链。";
     const user = [
         `上一条用户消息：\n${previousUserText || "未找到上一条用户消息"}`,
-        chain ? `参考思维链：\n${chain}` : "参考思维链：未匹配到，禁止自行编造思维链。",
+        chain ? `参考思维链：\n${chain}` : chainMissText,
         `截断/缺失检测：\n${unclosedText}`,
         `当前缺失或需要关注的标签规则：\n${missingText}`,
         `已经生成但可能被截断的 AI 回复：\n${sourceText}`,
@@ -1701,16 +1748,36 @@ function buildExtractRulesMessages(sampleText, pairs) {
     ];
 }
 
-function normalizeExtractedRules(text) {
+function makeRuleId() {
+    return crypto?.randomUUID ? crypto.randomUUID() : String(Date.now() + Math.random());
+}
+
+function createAnchoredRuleFromPair(pair) {
+    const endTag = String(pair.endTag || "");
+    const tag = String(pair.tag || endTag.replace(/^<\//, "").replace(/>$/, "") || "特殊块");
+    return {
+        id: makeRuleId(),
+        enabled: true,
+        name: `${tag} 开头块`,
+        startTag: START_OF_TEXT_TAG,
+        endTag,
+        prompt: `这是从回复开头开始、到 ${endTag} 结束的特殊块；需要保持内容完整、连贯，并保留结束标签。`,
+        template: `这里填写${tag}内容\n${endTag}`,
+        startAnchored: true,
+        forceTop: true,
+    };
+}
+
+function normalizeExtractedRules(text, fixedRules = []) {
     const cleaned = stripCodeFence(text);
     const match = cleaned.match(/\[[\s\S]*\]/);
     const parsed = JSON.parse(match ? match[0] : cleaned);
     if (!Array.isArray(parsed)) throw new Error("AI 未返回规则数组");
-    return parsed.map(item => {
+    const generated = parsed.map(item => {
         const startAnchored = Boolean(item.startAnchored || item.forceTop || item.startTag === START_OF_TEXT_TAG || item.startTag === START_OF_TEXT_LABEL);
         const endTag = String(item.endTag || "");
         return {
-            id: crypto?.randomUUID ? crypto.randomUUID() : String(Date.now() + Math.random()),
+            id: makeRuleId(),
             enabled: true,
             name: String(item.name || (startAnchored ? "开头特殊块" : "自动提取规则")),
             startTag: startAnchored ? START_OF_TEXT_TAG : String(item.startTag || ""),
@@ -1720,22 +1787,34 @@ function normalizeExtractedRules(text) {
             startAnchored,
             forceTop: Boolean(item.forceTop || startAnchored),
         };
-    }).filter(rule => (rule.startTag || isStartAnchoredRule(rule)) && rule.endTag)
-        .sort((a, b) => Number(Boolean(b.forceTop || isStartAnchoredRule(b))) - Number(Boolean(a.forceTop || isStartAnchoredRule(a))));
+    }).filter(rule => (rule.startTag || isStartAnchoredRule(rule)) && rule.endTag);
+
+    const fixedKeys = new Set(fixedRules.map(rule => `${rule.startTag}|${rule.endTag}`));
+    return [
+        ...fixedRules,
+        ...generated.filter(rule => !fixedKeys.has(`${rule.startTag}|${rule.endTag}`)),
+    ].sort((a, b) => Number(Boolean(b.forceTop || isStartAnchoredRule(b))) - Number(Boolean(a.forceTop || isStartAnchoredRule(a))));
 }
 
 async function runExtractRules() {
     const sample = String($("#response_refiner_extract_source").val() || "");
     const pairs = extractTagPairsFromSample(sample);
     if (!pairs.length) {
-        toastr.warning("未在样例中找到成对标签", "自动提取格式规则");
+        toastr.warning("未在样例中找到可提取标签或开头特殊块", "自动提取格式规则");
         return;
     }
+    const anchoredPairs = pairs.filter(pair => pair.startAnchored || pair.startTag === START_OF_TEXT_TAG);
+    const normalPairs = pairs.filter(pair => !(pair.startAnchored || pair.startTag === START_OF_TEXT_TAG));
+    const fixedRules = anchoredPairs.map(createAnchoredRuleFromPair);
     const $button = $("#response_refiner_extract_run");
     $button.prop("disabled", true).find("i").addClass("fa-spin");
     try {
-        const text = await callAI(buildExtractRulesMessages(sample, pairs));
-        state.extractedRules = normalizeExtractedRules(text);
+        if (normalPairs.length) {
+            const text = await callAI(buildExtractRulesMessages(sample, normalPairs));
+            state.extractedRules = normalizeExtractedRules(text, fixedRules);
+        } else {
+            state.extractedRules = fixedRules;
+        }
         $("#response_refiner_extract_output").text(JSON.stringify(state.extractedRules, null, 2));
         $("#response_refiner_extract_apply").prop("disabled", !state.extractedRules.length);
         toastr.success(`已生成 ${state.extractedRules.length} 条规则建议`, "自动提取格式规则");
