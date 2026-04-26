@@ -1806,11 +1806,21 @@ async function runExtractRules() {
     const anchoredPairs = pairs.filter(pair => pair.startAnchored || pair.startTag === START_OF_TEXT_TAG);
     const normalPairs = pairs.filter(pair => !(pair.startAnchored || pair.startTag === START_OF_TEXT_TAG));
     const fixedRules = anchoredPairs.map(createAnchoredRuleFromPair);
+    const extractMessages = normalPairs.length ? buildExtractRulesMessages(sample, normalPairs) : [];
+    console.group("[Response Refiner][Debug] 自动提取格式规则");
+    console.log("完整回复样例:", sample);
+    console.log("脚本提取到的标签 pairs:", pairs);
+    console.log("开头特殊块 anchoredPairs:", anchoredPairs);
+    console.log("交给 AI 生成规则的普通标签 normalPairs:", normalPairs);
+    console.log("脚本直接生成的开头规则 fixedRules:", fixedRules);
+    console.log("发送给 AI 的 messages:", extractMessages);
+    console.log("发送给 AI 的提示词文本:", extractMessages.map(message => `${message.role}:\n${message.content}`).join("\n\n---\n\n"));
+    console.groupEnd();
     const $button = $("#response_refiner_extract_run");
     $button.prop("disabled", true).find("i").addClass("fa-spin");
     try {
         if (normalPairs.length) {
-            const text = await callAI(buildExtractRulesMessages(sample, normalPairs));
+            const text = await callAI(extractMessages);
             state.extractedRules = normalizeExtractedRules(text, fixedRules);
         } else {
             state.extractedRules = fixedRules;
@@ -1875,6 +1885,16 @@ function updatePromptPreview() {
     const isUser = String($("#response_refiner_prompt_preview_type").val() || "assistant") === "user";
     const source = String($("#response_refiner_prompt_preview_source").val() || "");
     const selected = String($("#response_refiner_prompt_preview_part").val() || "refine");
+    const settings = getSettings();
+    const chainRegex = String(settings.completionChainRegex || settings.completionOutlineRegex || "");
+    if (selected === "completion" && !isUser) {
+        console.group("[Response Refiner][Debug] 提示词预览 - 回复补完思维链捕获");
+        console.log("使用的思维链正则:", chainRegex);
+        console.log("用于捕获的源文本:", source || "【这里是待处理文本】");
+        console.log("源文本长度:", String(source || "【这里是待处理文本】").length);
+        console.log("捕获结果:", extractChainContext(source || "【这里是待处理文本】", chainRegex));
+        console.groupEnd();
+    }
     const blocks = buildPromptPreviewBlocks(source, isUser);
     $("#response_refiner_prompt_preview_output").text(blocks[selected] || blocks.refine);
 }
