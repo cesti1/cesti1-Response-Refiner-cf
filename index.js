@@ -1,5 +1,5 @@
-import * as SillyTavern from "../../../script.js";
-import * as Extensions from "../../extensions.js";
+import * as SillyTavern from "../../../../script.js";
+import * as Extensions from "../../../extensions.js";
 
 const {
     chat,
