@@ -99,6 +99,22 @@
     border-left: 3px solid var(--warning);
 }
 
+.response-refiner-status-running {
+    border-left-color: var(--warning);
+}
+
+.response-refiner-status-done {
+    border-left-color: var(--okGreen);
+}
+
+.response-refiner-status-error {
+    border-left-color: var(--fullred);
+}
+
+.response-refiner-status-stopped {
+    border-left-color: var(--grey70);
+}
+
 .response-refiner-status-header {
     display: flex;
     align-items: center;
@@ -116,13 +132,14 @@
 .response-refiner-status-text {
     white-space: pre-wrap;
     word-break: break-word;
-    max-height: 220px;
+    max-height: 260px;
     overflow: auto;
     padding: 8px;
     border-radius: 6px;
     background: var(--black30a);
     color: var(--SmartThemeBodyColor);
     line-height: 1.5;
+    font-size: 12px;
 }
 
 #response_refiner_comparison_panel {
@@ -301,6 +318,10 @@
 .response-refiner-modal textarea.text_pole {
     min-height: unset;
     resize: vertical;
+}
+
+#response_refiner_prompt_preview_part {
+    border-left: 3px solid var(--SmartThemeQuoteColor);
 }
 
 .response-refiner-prompt-preview-output {

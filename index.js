@@ -599,18 +599,72 @@ function buildFormatMessages(sourceText, settings, replacementOnly = false) {
     ];
 }
 
+function findLastUnclosedTag(sourceText, rules) {
+    const source = String(sourceText || "");
+    const events = [];
+    for (const rule of rules) {
+        const start = String(rule.startTag || "");
+        const end = String(rule.endTag || "");
+        if (!start || !end) continue;
+        const regex = new RegExp(`${escapeRegExp(start)}|${escapeRegExp(end)}`, "g");
+        let match;
+        while ((match = regex.exec(source)) !== null) {
+            events.push({
+                index: match.index,
+                text: match[0],
+                type: match[0] === start ? "start" : "end",
+                rule,
+            });
+            if (match[0] === "") regex.lastIndex++;
+        }
+    }
+    events.sort((a, b) => a.index - b.index);
+    const stack = [];
+    for (const event of events) {
+        const key = getRuleKey(event.rule);
+        if (event.type === "start") {
+            stack.push(event);
+        } else {
+            const lastIndex = stack.map(item => getRuleKey(item.rule)).lastIndexOf(key);
+            if (lastIndex >= 0) stack.splice(lastIndex, 1);
+        }
+    }
+    return stack.length ? stack[stack.length - 1] : null;
+}
+
+function buildCompletionPlan(sourceText, settings, explicitMissingRules = []) {
+    const rules = getEnabledFormatRules(settings);
+    const body = getBodyRuleInfo(settings, false);
+    const unclosed = findLastUnclosedTag(sourceText, rules);
+    const missingRules = explicitMissingRules.length ? explicitMissingRules : getMissingFormatRules(sourceText, settings);
+    const isBodyUnclosed = Boolean(unclosed && body.key && getRuleKey(unclosed.rule) === body.key);
+    return {
+        rules,
+        body,
+        unclosed,
+        isBodyUnclosed,
+        missingRules,
+        missingNonBodyRules: missingRules.filter(rule => !body.key || getRuleKey(rule) !== body.key),
+    };
+}
+
 function buildCompletionMessages(sourceText, settings, messageId, missingRules = []) {
+    const plan = buildCompletionPlan(sourceText, settings, missingRules);
     const chain = extractChainContext(sourceText, settings.completionChainRegex || settings.completionOutlineRegex);
     const previousUser = getLatestUserMessage(messageId);
     const previousUserText = previousUser.message ? getMessageText(previousUser.message) : "";
-    const missingText = missingRules.length ? buildFormatRulesTextForRules(missingRules) : "无明确缺失标签，仅按截断位置补完。";
+    const missingText = plan.missingRules.length ? buildFormatRulesTextForRules(plan.missingRules) : "无明确缺失标签，仅按截断位置补完。";
+    const unclosedText = plan.unclosed
+        ? `最后一个未闭合标签：${plan.unclosed.rule.name || getRuleKey(plan.unclosed.rule)} ${plan.unclosed.rule.startTag} ... ${plan.unclosed.rule.endTag}`
+        : "未检测到未闭合标签。";
 
     const system = [
         "你是 AI 回复补完助手。当前 AI 回复可能被截断或缺少部分标签。",
-        "你必须配合格式检查规则继续生成剩余部分，续写内容需要满足标签顺序、开始标签、结束标签、标签内提示词和模板要求。",
         "补完依据：需要补完回复的上一条用户消息始终是主上下文；如果提供思维链，则结合思维链和上一条用户消息；没有思维链时只依靠上一条用户消息。",
-        "如果正文标签已开始但未完成，允许从正文开头或截断处继续补完，并遵守正文规则；格式修正阶段之后不会处理正文标签。",
-        "只输出续写或缺失标签内容，不要重复已经存在的完整内容，不要输出说明、标题或分析。",
+        plan.isBodyUnclosed
+            ? "关键要求：当前最后一个未闭合标签是正文标签。你必须优先从截断处继续写正文内容，不能只输出正文结束标签，也不能立刻跳到下一个标签。正文续写完整后，可以继续输出正文结束标签与后续缺失标签内容。"
+            : "你必须配合格式检查规则继续生成剩余部分，续写内容需要满足标签顺序、开始标签、结束标签、标签内提示词和模板要求。",
+        "只输出需要追加到当前回复末尾的内容，不要重复已经存在的完整内容，不要输出说明、标题、分析或 Markdown 代码块。",
         settings.completionPrompt || "",
         "全部格式标签规则：",
         buildFormatRulesText(settings),
@@ -619,9 +673,12 @@ function buildCompletionMessages(sourceText, settings, messageId, missingRules =
     const user = [
         `上一条用户消息：\n${previousUserText || "未找到上一条用户消息"}`,
         chain ? `参考思维链：\n${chain}` : "参考思维链：未匹配到，禁止自行编造思维链。",
+        `截断/缺失检测：\n${unclosedText}`,
         `当前缺失或需要关注的标签规则：\n${missingText}`,
         `已经生成但可能被截断的 AI 回复：\n${sourceText}`,
-        "请只输出需要追加到当前回复末尾的内容。",
+        plan.isBodyUnclosed
+            ? "请从正文截断处继续写，先补完整正文内容，再输出必要的正文结束标签和后续缺失标签。"
+            : "请只输出需要追加到当前回复末尾的内容。",
     ].join("\n\n---\n\n");
 
     return [
@@ -1057,10 +1114,40 @@ async function runFormat(sourceText, settings, signal, replacementOnly = true, o
     };
 }
 
-async function runCompletion(sourceText, settings, messageId, signal, onToken = null, missingRules = []) {
-    const continuation = await callAI(buildCompletionMessages(sourceText, settings, messageId, missingRules), { signal, stream: settings.streamStatusEnabled, onToken });
-    const joined = sourceText + continuation;
-    const formatted = joined;
+function appendTemplateForMissingRules(sourceText, rules) {
+    let result = sourceText;
+    const stillMissing = getMissingFormatRules(result, { ...getSettings(), formatRules: rules });
+    for (const rule of stillMissing) {
+        const template = String(rule.template || `${rule.startTag}\n\n${rule.endTag}`).trim();
+        if (template) {
+            result += `${result.endsWith("\n") ? "" : "\n"}${template}\n`;
+        }
+    }
+    return result;
+}
+
+function finalizeCompletionText(sourceText, continuation, settings, plan) {
+    let joined = sourceText + String(continuation || "");
+    if (plan?.isBodyUnclosed && plan.body?.endTag && !extractTaggedSegments(joined, [plan.body.rule]).some(item => item.found)) {
+        joined += `${joined.endsWith("\n") ? "" : "\n"}${plan.body.endTag}`;
+    }
+    if (plan?.isBodyUnclosed && plan.missingNonBodyRules?.length) {
+        joined = appendTemplateForMissingRules(joined, plan.missingNonBodyRules);
+    }
+    return joined;
+}
+
+async function runCompletion(sourceText, settings, messageId, signal, onToken = null, missingRules = [], onStatus = null) {
+    const plan = buildCompletionPlan(sourceText, settings, missingRules);
+    onStatus?.(plan.isBodyUnclosed
+        ? "检测到正文标签未闭合：将要求模型先从截断处续写正文，再由脚本兜底闭合正文标签。\n"
+        : "未检测到正文标签未闭合：按缺失标签/截断位置补完。\n");
+    const continuation = await callAI(buildCompletionMessages(sourceText, settings, messageId, plan.missingRules), { signal, stream: settings.streamStatusEnabled, onToken });
+    onStatus?.(`模型返回补完片段，长度 ${String(continuation || "").length} 字符。\n`);
+    const formatted = finalizeCompletionText(sourceText, continuation, settings, plan);
+    if (formatted !== sourceText + continuation) {
+        onStatus?.("脚本已执行补完兜底：闭合正文标签或追加后续缺失标签模板。\n");
+    }
     return {
         stage: "completion",
         original_text: sourceText,
@@ -1081,23 +1168,48 @@ function getSelectedStages(settings, isUser) {
     return stages;
 }
 
-function appendStatus(messageId, stage, text, reset = false) {
+function getStatusKey(messageId) {
+    return `${messageId}:active`;
+}
+
+function appendStatus(messageId, stage, text, reset = false, stateClass = "") {
     if (!getSettings().streamStatusEnabled) return;
-    const key = `${messageId}:${stage}`;
+    const key = getStatusKey(messageId);
     if (reset) state.statusBuffers.set(key, "");
-    const next = (state.statusBuffers.get(key) || "") + String(text || "");
+    const stamp = new Date().toLocaleTimeString();
+    const value = String(text || "");
+    const next = (state.statusBuffers.get(key) || "") + (value ? `[${stamp}] ${value}` : "");
     state.statusBuffers.set(key, next);
-    const $panel = $(`#chat .mes[mesid="${messageId}"] .response-refiner-status-panel`);
+    const $panel = $(`#chat .mes[mesid="${messageId}"] .response-refiner-status-panel`).last();
     if (!$panel.length) return;
+    $panel.removeClass("response-refiner-status-running response-refiner-status-done response-refiner-status-error response-refiner-status-stopped");
+    if (stateClass) $panel.addClass(stateClass);
     $panel.find(".response-refiner-status-stage").text(stage);
-    $panel.find(".response-refiner-status-text").text(next || "等待模型返回...");
+    $panel.find(".response-refiner-status-text").text(next || "等待开始...");
     const node = $panel.find(".response-refiner-status-text").get(0);
     if (node) node.scrollTop = node.scrollHeight;
 }
 
+function setStatusFinal(messageId, stage, text, stateClass) {
+    appendStatus(messageId, stage, text, false, stateClass);
+}
+
 function runStageWithStatus(messageId, stage, fn) {
-    appendStatus(messageId, stage, `开始执行：${stage}\n`, true);
-    return fn(token => appendStatus(messageId, stage, token));
+    appendStatus(messageId, stage, `开始执行：${stage}\n`, true, "response-refiner-status-running");
+    appendStatus(messageId, stage, "正在构建提示词并发送请求，等待模型返回...\n");
+    let outputStarted = false;
+    const onToken = token => {
+        if (!outputStarted) {
+            outputStarted = true;
+            appendStatus(messageId, stage, "收到模型输出：\n");
+        }
+        appendStatus(messageId, stage, token);
+    };
+    const onStatus = text => appendStatus(messageId, stage, text);
+    return fn(onToken, onStatus).then(result => {
+        appendStatus(messageId, stage, `阶段完成，候选文本长度 ${String(result?.candidate_text || "").length} 字符。\n`);
+        return result;
+    });
 }
 
 async function runSelectedPipeline(fullOriginalText, settings, isUser, messageId, signal) {
@@ -1113,21 +1225,30 @@ async function runSelectedPipeline(fullOriginalText, settings, isUser, messageId
     }
 
     toastr.info("执行已勾选功能会按需分步处理，最多消耗三次请求。", "Response Refiner");
+    appendStatus(messageId, "执行已勾选功能", "开始解析勾选功能与当前标签状态。\n", true, "response-refiner-status-running");
     const missingRules = getMissingFormatRules(workingText, settings);
-    if (settings.features.completionEnabled && missingRules.length) {
-        const result = await runStageWithStatus(messageId, "功能3 回复补完", onToken => runCompletion(workingText, settings, messageId, signal, onToken, missingRules));
+    const completionPlan = buildCompletionPlan(workingText, settings, missingRules);
+    appendStatus(messageId, "执行已勾选功能", `检测到缺失标签 ${missingRules.length} 个；正文未闭合：${completionPlan.isBodyUnclosed ? "是" : "否"}。\n`);
+    if (settings.features.completionEnabled && (missingRules.length || completionPlan.isBodyUnclosed)) {
+        const result = await runStageWithStatus(messageId, "功能3 回复补完", (onToken, onStatus) => runCompletion(workingText, settings, messageId, signal, onToken, missingRules, onStatus));
         stageResults.push(result);
         workingText = result.candidate_text;
+    } else {
+        appendStatus(messageId, "执行已勾选功能", settings.features.completionEnabled ? "跳过回复补完：未检测到缺失标签或正文未闭合。\n" : "跳过回复补完：设置中未启用。\n");
     }
     if (settings.features.formatEnabled) {
-        const result = await runStageWithStatus(messageId, "功能2 格式检查和补全修正", onToken => runFormat(workingText, settings, signal, true, onToken));
+        const result = await runStageWithStatus(messageId, "功能2 格式检查和补全修正", (onToken) => runFormat(workingText, settings, signal, true, onToken));
         stageResults.push(result);
         workingText = result.candidate_text;
+    } else {
+        appendStatus(messageId, "执行已勾选功能", "跳过格式检查：设置中未启用。\n");
     }
     if (settings.features.refineEnabled) {
-        const result = await runStageWithStatus(messageId, "功能1 润色", onToken => runRefine(workingText, settings, false, signal, onToken));
+        const result = await runStageWithStatus(messageId, "功能1 润色", (onToken) => runRefine(workingText, settings, false, signal, onToken));
         stageResults.push(result);
         workingText = result.candidate_text;
+    } else {
+        appendStatus(messageId, "执行已勾选功能", "跳过润色：设置中未启用。\n");
     }
     return { workingText, stageResults, stages: ["selected"] };
 }
@@ -1164,7 +1285,9 @@ async function requestFeature(messageId, feature) {
     const controller = new AbortController();
     state.busyMessageIds.add(resolvedId);
     state.requestControllers.set(resolvedId, controller);
+    state.statusBuffers.delete(getStatusKey(resolvedId));
     updateMessageButtons(resolvedId);
+    appendStatus(resolvedId, "请求已创建", `准备执行：${feature === "selected" ? "执行设置中已勾选的功能" : stages.join("、")}。\n`, true, "response-refiner-status-running");
 
     try {
         const fullOriginalText = getMessageText(message);
@@ -1180,11 +1303,11 @@ async function requestFeature(messageId, feature) {
             for (const stage of stages) {
                 let result;
                 if (stage === "refine") {
-                    result = await runStageWithStatus(resolvedId, "功能1 润色", onToken => runRefine(workingText, settings, isUser, controller.signal, onToken));
+                    result = await runStageWithStatus(resolvedId, "功能1 润色", (onToken) => runRefine(workingText, settings, isUser, controller.signal, onToken));
                 } else if (stage === "format") {
-                    result = await runStageWithStatus(resolvedId, "功能2 格式检查和补全修正", onToken => runFormat(workingText, settings, controller.signal, true, onToken));
+                    result = await runStageWithStatus(resolvedId, "功能2 格式检查和补全修正", (onToken) => runFormat(workingText, settings, controller.signal, true, onToken));
                 } else if (stage === "completion") {
-                    result = await runStageWithStatus(resolvedId, "功能3 回复补完", onToken => runCompletion(workingText, settings, resolvedId, controller.signal, onToken, getMissingFormatRules(workingText, settings)));
+                    result = await runStageWithStatus(resolvedId, "功能3 回复补完", (onToken, onStatus) => runCompletion(workingText, settings, resolvedId, controller.signal, onToken, getMissingFormatRules(workingText, settings), onStatus));
                 } else {
                     continue;
                 }
@@ -1206,15 +1329,19 @@ async function requestFeature(messageId, feature) {
             applied: false,
         };
 
+        appendStatus(resolvedId, "保存结果", "候选结果已生成，正在保存聊天数据。\n");
         await saveChatConditional();
         updateMessageButtons(resolvedId);
         updateComparisonPanel(resolvedId);
+        setStatusFinal(resolvedId, "处理完成", "处理完成，请在预览中确认候选结果。\n", "response-refiner-status-done");
         toastr.success("处理完成，请查看预览并决定是否替换", "Response Refiner");
     } catch (error) {
         if (error?.name === "AbortError") {
+            setStatusFinal(resolvedId, "已停止", "请求已停止。\n", "response-refiner-status-stopped");
             toastr.warning("请求已停止", "Response Refiner");
         } else {
             console.error("[Response Refiner] 处理失败:", error);
+            setStatusFinal(resolvedId, "处理失败", `${String(error instanceof Error ? error.message : error)}\n`, "response-refiner-status-error");
             toastr.error(String(error instanceof Error ? error.message : error), "Response Refiner");
         }
     } finally {
@@ -1294,6 +1421,9 @@ function updateMessageButtons(messageId) {
     }
     $container.empty();
     $messageBlock.find(".response-refiner-preview").remove();
+    if (!state.busyMessageIds.has(messageId)) {
+        $messageBlock.find(".response-refiner-status-panel.response-refiner-status-running").removeClass("response-refiner-status-running");
+    }
 
     const settings = getSettings();
     const isUser = isUserMessage(message);
@@ -1349,13 +1479,20 @@ function updateMessageButtons(messageId) {
 }
 
 function renderStatusPanel($container, messageId) {
-    const $panel = $("<div>", { class: "response-refiner-status-panel" });
-    const $header = $("<div>", { class: "response-refiner-status-header" });
-    $header.append($("<strong>", { text: "生成状态" }));
-    $header.append($("<span>", { class: "response-refiner-status-stage", text: "等待开始" }));
-    const $text = $("<div>", { class: "response-refiner-status-text", text: "等待模型返回..." });
-    $panel.append($header, $text);
-    $container.after($panel);
+    const $messageBlock = $container.closest(".mes");
+    let $panel = $messageBlock.find(".response-refiner-status-panel").last();
+    if (!$panel.length) {
+        $panel = $("<div>", { class: "response-refiner-status-panel response-refiner-status-running" });
+        const $header = $("<div>", { class: "response-refiner-status-header" });
+        $header.append($("<strong>", { text: "生成状态" }));
+        $header.append($("<span>", { class: "response-refiner-status-stage", text: "等待开始" }));
+        const $text = $("<div>", { class: "response-refiner-status-text", text: "等待开始..." });
+        $panel.append($header, $text);
+        $container.after($panel);
+    } else if (!$panel.prev().is($container)) {
+        $panel.detach().insertAfter($container);
+    }
+    $messageBlock.find(".response-refiner-status-panel").not($panel).remove();
     appendStatus(messageId, "等待开始", "");
 }
 
@@ -1370,7 +1507,7 @@ function renderInlinePreview($container, refinerData) {
     const $left = $("<div>");
     const $right = $("<div>");
     $left.append($("<div>", { class: "response-refiner-preview-title", text: "原文/输入" }));
-    $left.append($("<div>", { class: "response-refiner-preview-text" }).text(refinerData.original_text || refinerData.full_original_text || ""));
+    $left.append($("<div>", { class: "response-refiner-preview-text" }).text(refinerData.full_original_text || refinerData.original_text || ""));
     $right.append($("<div>", { class: "response-refiner-preview-title", text: "候选结果" }));
     $right.append($("<div>", { class: "response-refiner-preview-text" }).text(refinerData.candidate_text || refinerData.refined_text || ""));
     $grid.append($left, $right);
@@ -1404,7 +1541,7 @@ function updateComparisonPanel(messageId) {
 
     const $left = $("<div>", { class: "response-refiner-comparison-column" });
     $left.append($("<div>", { class: "response-refiner-comparison-title", text: "原文/输入" }));
-    $left.append($("<div>", { class: "response-refiner-comparison-text" }).text(refinerData.original_text || refinerData.full_original_text || ""));
+    $left.append($("<div>", { class: "response-refiner-comparison-text" }).text(refinerData.full_original_text || refinerData.original_text || ""));
     const $right = $("<div>", { class: "response-refiner-comparison-column" });
     $right.append($("<div>", { class: "response-refiner-comparison-title", text: "候选结果" }));
     $right.append($("<div>", { class: "response-refiner-comparison-text" }).text(refinerData.candidate_text || ""));
@@ -1510,31 +1647,36 @@ function formatPromptMessagesForPreview(title, messages) {
     ].join("\n\n");
 }
 
-function buildSelectedPromptPreview(sourceText, isUser) {
+function buildPromptPreviewBlocks(sourceText, isUser) {
     const settings = getSettings();
     const source = sourceText || "【这里是待处理文本】";
-    const blocks = [];
     const textToRefine = isUser ? source : extractTextToRefine(source, settings);
-    blocks.push(formatPromptMessagesForPreview("功能1 润色", buildRefineMessages(textToRefine, settings, isUser)));
-    if (!isUser) {
-        blocks.push(formatPromptMessagesForPreview("功能2 格式检查和补全修正（仅非正文标签，返回替换 JSON）", buildFormatMessages(source, settings, true)));
-        blocks.push(formatPromptMessagesForPreview("功能3 回复补完", buildCompletionMessages(source, settings, chat.length, getMissingFormatRules(source, settings))));
-        blocks.push([
+    return {
+        refine: formatPromptMessagesForPreview("功能1 润色", buildRefineMessages(textToRefine, settings, isUser)),
+        format: isUser
+            ? "## 功能2 格式检查和补全修正\n用户输入不执行格式检查。"
+            : formatPromptMessagesForPreview("功能2 格式检查和补全修正（仅非正文标签，返回替换 JSON）", buildFormatMessages(source, settings, true)),
+        completion: isUser
+            ? "## 功能3 回复补完\n用户输入不执行回复补完。"
+            : formatPromptMessagesForPreview("功能3 回复补完", buildCompletionMessages(source, settings, chat.length, getMissingFormatRules(source, settings))),
+        selected: [
             "## 执行设置中已勾选的功能（三步组合管线）",
             "脚本先解析当前回复标签状态，然后按需执行：",
-            "1. 若启用回复补完且发现缺失标签，则调用功能3补完；否则跳过补完请求。",
+            "1. 若启用回复补完且发现缺失标签或正文标签未闭合，则调用功能3补完；否则跳过补完请求。",
             "2. 若启用格式检查，则调用功能2，只修正和补全非正文标签。",
             "3. 若启用润色，则调用功能1，只润色润色捕获正则对应的正文标签内容。",
-            "组合执行最多会消耗三次请求，最终由脚本把每个阶段生成的标签内文本回填到原文。",
-        ].join("\n"));
-    }
-    return blocks.join("\n\n====================\n\n");
+            "4. 状态窗口会记录每个阶段的跳过原因、等待响应、收到输出、保存结果和完成/错误状态。",
+            "组合执行最多会消耗三次请求，最终由脚本把每个阶段生成的候选文本继续传给下一阶段。",
+        ].join("\n"),
+    };
 }
 
 function updatePromptPreview() {
     const isUser = String($("#response_refiner_prompt_preview_type").val() || "assistant") === "user";
     const source = String($("#response_refiner_prompt_preview_source").val() || "");
-    $("#response_refiner_prompt_preview_output").text(buildSelectedPromptPreview(source, isUser));
+    const selected = String($("#response_refiner_prompt_preview_part").val() || "refine");
+    const blocks = buildPromptPreviewBlocks(source, isUser);
+    $("#response_refiner_prompt_preview_output").text(blocks[selected] || blocks.refine);
 }
 
 function initCollapsibleSections() {
@@ -1753,7 +1895,7 @@ function bindSettings() {
         settings.completionPrompt = String($(this).val());
         saveSettings();
     });
-    $("#response_refiner_prompt_preview_type, #response_refiner_prompt_preview_source").on("input change", updatePromptPreview);
+    $("#response_refiner_prompt_preview_type, #response_refiner_prompt_preview_part, #response_refiner_prompt_preview_source").on("input change", updatePromptPreview);
     $("#response_refiner_refresh_prompt_preview").on("click", updatePromptPreview);
 
     $("#response_refiner_open_extract_rules").on("click", function () {

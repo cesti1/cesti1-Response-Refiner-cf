@@ -88,12 +88,21 @@
             <div class="response-refiner-section" data-section-id="prompt-preview">
                 <div class="response-refiner-section-header" role="button" tabindex="0"><h4>提示词预览</h4><i class="fa-solid fa-chevron-down response-refiner-section-icon"></i></div>
                 <div class="response-refiner-section-body">
-                    <div class="response-refiner-note marginBot8">这里分四段预览：功能1、功能2、功能3，以及“执行设置中已勾选的功能”的组合管线说明。预览不会发起请求。</div>
+                    <div class="response-refiner-note marginBot8">这里分四段可切换预览：功能1、功能2、功能3，以及“执行设置中已勾选的功能”的组合管线说明。预览不会发起请求。</div>
                     <label for="response_refiner_prompt_preview_type">消息类型</label>
                     <select id="response_refiner_prompt_preview_type" class="text_pole marginBot8"><option value="assistant">AI 回复</option><option value="user">用户输入</option></select>
+                    <label for="response_refiner_prompt_preview_part">预览段落</label>
+                    <select id="response_refiner_prompt_preview_part" class="text_pole marginBot8">
+                        <option value="refine">功能1：润色</option>
+                        <option value="format">功能2：格式检查和补全修正</option>
+                        <option value="completion">功能3：回复补完</option>
+                        <option value="selected">执行设置中已勾选的功能</option>
+                    </select>
                     <label for="response_refiner_prompt_preview_source">预览输入文本</label>
                     <textarea id="response_refiner_prompt_preview_source" class="text_pole marginBot8" rows="5" placeholder="粘贴一段回复或用户输入，用来生成实际提示词预览"></textarea>
-                    <div id="response_refiner_refresh_prompt_preview" class="menu_button response-refiner-menu-button marginBot8"><i class="fa-solid fa-arrows-rotate"></i><span>刷新提示词预览</span></div>
+                    <div class="response-refiner-button-row marginBot8">
+                        <div id="response_refiner_refresh_prompt_preview" class="menu_button response-refiner-menu-button"><i class="fa-solid fa-arrows-rotate"></i><span>刷新提示词预览</span></div>
+                    </div>
                     <pre id="response_refiner_prompt_preview_output" class="response-refiner-prompt-preview-output">暂无预览</pre>
                 </div>
             </div>
