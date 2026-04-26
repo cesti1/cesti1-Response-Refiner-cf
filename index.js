@@ -11,7 +11,7 @@ import {
     renderExtensionTemplateAsync,
 } from "../../extensions.js";
 
-const MODULE_NAME = "response-refiner";
+const MODULE_NAME = "cesti1-Response-Refiner-cf";
 const SETTINGS_KEY = /** @type {const} */ ("response_refiner");
 const VERSION = "0.1.0-beta.1";
 
