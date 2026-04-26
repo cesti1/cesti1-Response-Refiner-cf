@@ -122,7 +122,7 @@ const DEFAULT_SETTINGS = {
     connectionType: "cloudflare",
     providers: DEFAULT_PROVIDER_SETTINGS,
     prompt: "你是一个文本润色助手。你只能处理用户提供的文本，不引入对话历史、设定扩写、旁白说明或解释。保持原意不变，只提升措辞、流畅度、节奏、文笔与可读性。直接输出处理后的正文，不要添加前后缀说明。",
-    userPrompt: "你是一个文本润色助手。请润色用户提供的输入文本，提升表达的清晰度、准确性和流畅度。保持原意不变，直接输出润色后的文本，不要添加前后缀说明。",
+    userPrompt: "你是一个用户输入润色助手。用户输入通常只是一小段简单描述、指令或台词。你只能在原始输入范围内改善措辞、错别字、语序和清晰度，不得扩写成章节、正文、剧情段落、完整回复或新增设定。保持长度与信息量基本接近原文，直接输出润色后的用户输入，不要添加解释、标题、前后缀或引号。",
     temperature: 0.7,
     maxTokens: 1200,
     filterRegex: "<content>([\\s\\S]*?)</content>",
@@ -147,6 +147,8 @@ const DEFAULT_SETTINGS = {
     completionOutlineRegex: "",
     completionPrompt: "如果当前 AI 回复被截断，请根据格式规则、可用大纲或用户最后一次输入继续补完。只输出续写部分，不要重复已经存在的内容，不要解释。",
     completionContextMessages: 6,
+    uiCollapsedSections: {},
+    collapsedFormatRules: {},
 };
 
 /** @typedef {{ mes?: string, is_user?: boolean, is_system?: boolean, extra?: Record<string, any> }} RefinerChatMessage */
@@ -154,7 +156,9 @@ const DEFAULT_SETTINGS = {
 const state = {
     initialized: false,
     busyMessageIds: new Set(),
+    requestControllers: new Map(),
     comparisonPanelVisible: false,
+    extractedRules: [],
 };
 
 function deepClone(value) {
@@ -428,11 +432,58 @@ function buildFormatRulesText(settings) {
 
     return rules.map(rule => [
         `${rule.order}. ${rule.name || "未命名标签"}`,
+        `规则ID：${getRuleKey(rule)}`,
         `开始标签：${rule.startTag}`,
         `结束标签：${rule.endTag}`,
         `标签内提示词：${rule.prompt || "无"}`,
         `标签内容模板：\n${rule.template || `${rule.startTag}\n\n${rule.endTag}`}`,
     ].join("\n")).join("\n\n");
+}
+
+function getRuleKey(rule) {
+    return String(rule.id || rule.name || rule.startTag || "rule").replace(/[^a-zA-Z0-9_\-\u4e00-\u9fa5]/g, "_");
+}
+
+function escapeRegExp(value) {
+    return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function extractTaggedSegments(text, rules) {
+    const source = String(text || "");
+    return rules.map(rule => {
+        const start = String(rule.startTag || "");
+        const end = String(rule.endTag || "");
+        if (!start || !end) {
+            return { rule, key: getRuleKey(rule), content: "", found: false };
+        }
+        const regex = new RegExp(`${escapeRegExp(start)}([\\s\\S]*?)${escapeRegExp(end)}`, "g");
+        const matches = [];
+        let match;
+        while ((match = regex.exec(source)) !== null) {
+            matches.push(match[1] || "");
+            if (match[0] === "") regex.lastIndex++;
+        }
+        return { rule, key: getRuleKey(rule), content: matches.length ? matches[matches.length - 1] : "", found: matches.length > 0 };
+    });
+}
+
+function buildFormatReplacementPromptText(sourceText, settings) {
+    const rules = getEnabledFormatRules(settings);
+    const segments = extractTaggedSegments(sourceText, rules);
+    return [
+        "你是 AI 回复格式检查和补全修正助手。",
+        "你会收到完整 AI 回复、格式标签规则、每个标签内当前内容。",
+        "你的任务是修正每个已启用规则对应标签内部的文本，使其满足标签提示词和模板要求。",
+        "为了减少输出 token，你绝对不要输出完整回复、开始标签、结束标签、解释或 Markdown 代码块。",
+        "你必须只输出一个 JSON 对象，键为规则ID，值为该规则标签内修正后的纯文本。",
+        "如果某个标签不存在但规则要求补全，请仍在对应规则ID里输出应插入的标签内文本。",
+        "格式标签规则：",
+        buildFormatRulesText(settings),
+        "当前标签内内容：",
+        JSON.stringify(Object.fromEntries(segments.map(item => [item.key, item.content])), null, 2),
+        "完整 AI 回复文本仍作为上下文提供，但不要完整复述：",
+        sourceText,
+    ].join("\n");
 }
 
 function buildRefineMessages(sourceText, settings, isUser) {
@@ -448,7 +499,14 @@ function buildRefineMessages(sourceText, settings, isUser) {
     ];
 }
 
-function buildFormatMessages(sourceText, settings) {
+function buildFormatMessages(sourceText, settings, replacementOnly = false) {
+    if (replacementOnly) {
+        return [
+            { role: "system", content: "你是严格的格式标签内容修正器。你只输出符合要求的 JSON 对象，不输出解释、完整回复、标签或 Markdown。" },
+            { role: "user", content: buildFormatReplacementPromptText(sourceText, settings) },
+        ];
+    }
+
     const system = [
         "你是 AI 回复格式检查和补全修正助手。",
         "你只能根据用户提供的当前 AI 回复文本、格式标签规则、标签提示词和模板进行修正。",
@@ -519,6 +577,7 @@ async function callAI(messages, options = {}) {
     const apiKey = getCurrentApiKey();
     const maxTokens = Number(options.maxTokens || settings.maxTokens) || DEFAULT_SETTINGS.maxTokens;
     const temperature = Number(options.temperature ?? settings.temperature) || 0;
+    const signal = options.signal;
 
     if (!endpoint || !model) {
         throw new Error("请先配置接口地址和模型");
@@ -528,20 +587,21 @@ async function callAI(messages, options = {}) {
     }
 
     if (provider.apiStyle === "gemini") {
-        return callGemini(endpoint, model, apiKey, messages, temperature, maxTokens);
+        return callGemini(endpoint, model, apiKey, messages, temperature, maxTokens, signal);
     }
 
     if (provider.apiStyle === "claude") {
-        return callClaude(endpoint, model, apiKey, messages, temperature, maxTokens);
+        return callClaude(endpoint, model, apiKey, messages, temperature, maxTokens, signal);
     }
 
-    return callOpenAICompatible(providerKey, endpoint, model, apiKey, messages, temperature, maxTokens);
+    return callOpenAICompatible(providerKey, endpoint, model, apiKey, messages, temperature, maxTokens, signal);
 }
 
-async function callOpenAICompatible(providerKey, endpoint, model, apiKey, messages, temperature, maxTokens) {
+async function callOpenAICompatible(providerKey, endpoint, model, apiKey, messages, temperature, maxTokens, signal) {
     const response = await fetch(`${endpoint}/chat/completions`, {
         method: "POST",
         headers: getOpenAICompatibleHeaders(providerKey, apiKey),
+        signal,
         body: JSON.stringify({
             model,
             messages,
@@ -563,13 +623,14 @@ async function callOpenAICompatible(providerKey, endpoint, model, apiKey, messag
     return stripCodeFence(content);
 }
 
-async function callGemini(endpoint, model, apiKey, messages, temperature, maxTokens) {
+async function callGemini(endpoint, model, apiKey, messages, temperature, maxTokens, signal) {
     const modelName = model.startsWith("models/") ? model : `models/${model}`;
     const systemText = messages.filter(item => item.role === "system").map(item => item.content).join("\n\n");
     const userText = messages.filter(item => item.role !== "system").map(item => item.content).join("\n\n");
     const response = await fetch(`${endpoint}/${modelName}:generateContent?key=${encodeURIComponent(apiKey)}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        signal,
         body: JSON.stringify({
             systemInstruction: systemText ? { parts: [{ text: systemText }] } : undefined,
             contents: [{ role: "user", parts: [{ text: userText }] }],
@@ -593,11 +654,12 @@ async function callGemini(endpoint, model, apiKey, messages, temperature, maxTok
     return stripCodeFence(content);
 }
 
-async function callClaude(endpoint, model, apiKey, messages, temperature, maxTokens) {
+async function callClaude(endpoint, model, apiKey, messages, temperature, maxTokens, signal) {
     const system = messages.filter(item => item.role === "system").map(item => item.content).join("\n\n");
     const user = messages.filter(item => item.role !== "system").map(item => item.content).join("\n\n");
     const response = await fetch(`${endpoint}/v1/messages`, {
         method: "POST",
+        signal,
         headers: {
             "Content-Type": "application/json",
             "x-api-key": apiKey,
@@ -780,9 +842,9 @@ async function testConnection() {
     }
 }
 
-async function runRefine(originalText, settings, isUser) {
+async function runRefine(originalText, settings, isUser, signal) {
     const textToRefine = isUser ? originalText : extractTextToRefine(originalText, settings);
-    const refinedText = await callAI(buildRefineMessages(textToRefine, settings, isUser));
+    const refinedText = await callAI(buildRefineMessages(textToRefine, settings, isUser), { signal });
     const finalText = isUser ? refinedText : replaceRefinedText(originalText, refinedText, settings);
     return {
         stage: "refine",
@@ -792,21 +854,82 @@ async function runRefine(originalText, settings, isUser) {
     };
 }
 
-async function runFormat(sourceText, settings) {
-    const formattedText = await callAI(buildFormatMessages(sourceText, settings));
+function parseFormatReplacementOutput(text) {
+    const cleaned = stripCodeFence(text);
+    try {
+        return JSON.parse(cleaned);
+    } catch (_error) {
+        const match = cleaned.match(/\{[\s\S]*\}/);
+        if (match) {
+            return JSON.parse(match[0]);
+        }
+        throw new Error("格式检查返回内容不是可解析 JSON");
+    }
+}
+
+function replaceTaggedSegmentContent(sourceText, rule, replacement) {
+    const start = String(rule.startTag || "");
+    const end = String(rule.endTag || "");
+    const value = String(replacement ?? "").trim();
+    if (!start || !end || !value) {
+        return sourceText;
+    }
+
+    const regex = new RegExp(`${escapeRegExp(start)}([\\s\\S]*?)${escapeRegExp(end)}`, "g");
+    let lastMatch = null;
+    let match;
+    while ((match = regex.exec(sourceText)) !== null) {
+        lastMatch = match;
+        if (match[0] === "") regex.lastIndex++;
+    }
+
+    if (!lastMatch) {
+        return `${sourceText}\n${start}\n${value}\n${end}`;
+    }
+
+    const before = sourceText.slice(0, lastMatch.index);
+    const after = sourceText.slice(lastMatch.index + lastMatch[0].length);
+    return `${before}${start}${value.startsWith("\n") ? "" : "\n"}${value}${value.endsWith("\n") ? "" : "\n"}${end}${after}`;
+}
+
+function applyFormatReplacements(sourceText, settings, replacements) {
+    let result = sourceText;
+    for (const rule of getEnabledFormatRules(settings)) {
+        const key = getRuleKey(rule);
+        if (Object.prototype.hasOwnProperty.call(replacements, key)) {
+            result = replaceTaggedSegmentContent(result, rule, replacements[key]);
+        }
+    }
+    return result;
+}
+
+async function runFormat(sourceText, settings, signal, replacementOnly = true) {
+    if (!replacementOnly) {
+        const formattedText = await callAI(buildFormatMessages(sourceText, settings), { signal });
+        return {
+            stage: "format",
+            original_text: sourceText,
+            refined_text: formattedText,
+            candidate_text: formattedText,
+        };
+    }
+
+    const replacementText = await callAI(buildFormatMessages(sourceText, settings, true), { signal });
+    const replacements = parseFormatReplacementOutput(replacementText);
+    const formattedText = applyFormatReplacements(sourceText, settings, replacements);
     return {
         stage: "format",
         original_text: sourceText,
-        refined_text: formattedText,
+        refined_text: JSON.stringify(replacements, null, 2),
         candidate_text: formattedText,
     };
 }
 
-async function runCompletion(sourceText, settings, messageId) {
-    const continuation = await callAI(buildCompletionMessages(sourceText, settings, messageId));
+async function runCompletion(sourceText, settings, messageId, signal) {
+    const continuation = await callAI(buildCompletionMessages(sourceText, settings, messageId), { signal });
     const joined = sourceText + continuation;
     const formatted = getEnabledFormatRules(settings).length
-        ? await callAI(buildFormatMessages(joined, settings))
+        ? (await runFormat(joined, settings, signal, true)).candidate_text
         : joined;
     return {
         stage: "completion",
@@ -856,7 +979,9 @@ async function requestFeature(messageId, feature) {
         return;
     }
 
+    const controller = new AbortController();
     state.busyMessageIds.add(resolvedId);
+    state.requestControllers.set(resolvedId, controller);
     updateMessageButtons(resolvedId);
 
     try {
@@ -867,11 +992,11 @@ async function requestFeature(messageId, feature) {
         for (const stage of stages) {
             let result;
             if (stage === "refine") {
-                result = await runRefine(workingText, settings, isUser);
+                result = await runRefine(workingText, settings, isUser, controller.signal);
             } else if (stage === "format") {
-                result = await runFormat(workingText, settings);
+                result = await runFormat(workingText, settings, controller.signal, true);
             } else if (stage === "completion") {
-                result = await runCompletion(workingText, settings, resolvedId);
+                result = await runCompletion(workingText, settings, resolvedId, controller.signal);
             } else {
                 continue;
             }
@@ -897,11 +1022,23 @@ async function requestFeature(messageId, feature) {
         updateComparisonPanel(resolvedId);
         toastr.success("处理完成，请查看预览并决定是否替换", "Response Refiner");
     } catch (error) {
-        console.error("[Response Refiner] 处理失败:", error);
-        toastr.error(String(error instanceof Error ? error.message : error), "Response Refiner");
+        if (error?.name === "AbortError") {
+            toastr.warning("请求已停止", "Response Refiner");
+        } else {
+            console.error("[Response Refiner] 处理失败:", error);
+            toastr.error(String(error instanceof Error ? error.message : error), "Response Refiner");
+        }
     } finally {
         state.busyMessageIds.delete(resolvedId);
+        state.requestControllers.delete(resolvedId);
         updateMessageButtons(resolvedId);
+    }
+}
+
+function stopRequest(messageId) {
+    const controller = state.requestControllers.get(messageId);
+    if (controller) {
+        controller.abort();
     }
 }
 
@@ -977,7 +1114,10 @@ function updateMessageButtons(messageId) {
     const isApplied = Boolean(refinerData?.applied);
 
     if (isBusy) {
+        const $stopBtn = makeActionButton(messageId, "stop", "fa-stop", "停止当前请求");
+        $stopBtn.removeClass("response-refiner-run").addClass("response-refiner-stop");
         $container.append(makeActionButton(messageId, "busy", "fa-spinner fa-spin", "处理中", true));
+        $container.append($stopBtn);
     } else {
         if (settings.features.refineEnabled) {
             $container.append(makeActionButton(messageId, "refine", "fa-wand-magic-sparkles", "润色（含八股文替换/移除提示词）"));
@@ -988,7 +1128,9 @@ function updateMessageButtons(messageId) {
         if (!isUser && settings.features.completionEnabled) {
             $container.append(makeActionButton(messageId, "completion", "fa-forward", "回复补完"));
         }
-        $container.append(makeActionButton(messageId, "selected", "fa-list-check", "执行设置中已勾选的功能"));
+        if (!isUser) {
+            $container.append(makeActionButton(messageId, "selected", "fa-list-check", "执行设置中已勾选的功能"));
+        }
     }
 
     if (hasCandidate && !isApplied) {
@@ -1076,6 +1218,144 @@ function toggleComparisonPanel() {
     }
 }
 
+function extractTagPairsFromSample(text) {
+    const source = String(text || "");
+    const tagRegex = /<([a-zA-Z][\w:-]*)\b[^>]*>([\s\S]*?)<\/\1>/g;
+    const pairs = [];
+    const seen = new Set();
+    let match;
+    while ((match = tagRegex.exec(source)) !== null) {
+        const tag = match[1];
+        if (seen.has(tag)) continue;
+        seen.add(tag);
+        pairs.push({ tag, startTag: `<${tag}>`, endTag: `</${tag}>`, content: match[2] || "" });
+    }
+    return pairs;
+}
+
+function buildExtractRulesMessages(sampleText, pairs) {
+    return [
+        { role: "system", content: "你是格式规则提取助手。你只输出 JSON 数组，不输出解释、Markdown 或额外文本。" },
+        { role: "user", content: [
+            "请根据完整回复样例和已提取的标签，为每个标签生成格式检查规则建议。",
+            "输出 JSON 数组，每项包含 name、startTag、endTag、prompt、template。",
+            "prompt 要描述该标签内部内容应该满足的规则；template 要包含开始标签、占位内容和结束标签。",
+            "已提取标签：",
+            JSON.stringify(pairs, null, 2),
+            "完整回复样例：",
+            sampleText,
+        ].join("\n") },
+    ];
+}
+
+function normalizeExtractedRules(text) {
+    const cleaned = stripCodeFence(text);
+    const match = cleaned.match(/\[[\s\S]*\]/);
+    const parsed = JSON.parse(match ? match[0] : cleaned);
+    if (!Array.isArray(parsed)) throw new Error("AI 未返回规则数组");
+    return parsed.map(item => ({
+        id: crypto?.randomUUID ? crypto.randomUUID() : String(Date.now() + Math.random()),
+        enabled: true,
+        name: String(item.name || "自动提取规则"),
+        startTag: String(item.startTag || ""),
+        endTag: String(item.endTag || ""),
+        prompt: String(item.prompt || ""),
+        template: String(item.template || `${item.startTag || ""}\n\n${item.endTag || ""}`),
+    })).filter(rule => rule.startTag && rule.endTag);
+}
+
+async function runExtractRules() {
+    const sample = String($("#response_refiner_extract_source").val() || "");
+    const pairs = extractTagPairsFromSample(sample);
+    if (!pairs.length) {
+        toastr.warning("未在样例中找到成对标签", "自动提取格式规则");
+        return;
+    }
+    const $button = $("#response_refiner_extract_run");
+    $button.prop("disabled", true).find("i").addClass("fa-spin");
+    try {
+        const text = await callAI(buildExtractRulesMessages(sample, pairs));
+        state.extractedRules = normalizeExtractedRules(text);
+        $("#response_refiner_extract_output").text(JSON.stringify(state.extractedRules, null, 2));
+        $("#response_refiner_extract_apply").prop("disabled", !state.extractedRules.length);
+        toastr.success(`已生成 ${state.extractedRules.length} 条规则建议`, "自动提取格式规则");
+    } catch (error) {
+        console.error("[Response Refiner] 自动提取格式规则失败:", error);
+        toastr.error(String(error instanceof Error ? error.message : error), "自动提取格式规则");
+    } finally {
+        $button.prop("disabled", false).find("i").removeClass("fa-spin");
+    }
+}
+
+function applyExtractedRules() {
+    if (!state.extractedRules.length) return;
+    const settings = getSettings();
+    syncFormatRulesFromDom();
+    settings.formatRules.push(...state.extractedRules);
+    state.extractedRules = [];
+    saveSettings();
+    renderFormatRules();
+    $("#response_refiner_extract_apply").prop("disabled", true);
+    $("#response_refiner_extract_modal").hide();
+    toastr.success("已追加自动提取的格式规则", "自动提取格式规则");
+}
+
+function formatPromptMessagesForPreview(title, messages) {
+    return [
+        `## ${title}`,
+        ...messages.map((message, index) => `### ${index + 1}. ${message.role}\n${message.content}`),
+    ].join("\n\n");
+}
+
+function buildSelectedPromptPreview(sourceText, isUser) {
+    const settings = getSettings();
+    const stages = getSelectedStages(settings, isUser);
+    if (!stages.length) return "没有已启用的可执行功能。";
+
+    const blocks = [];
+    let workingText = sourceText || "【这里是待处理文本】";
+    for (const stage of stages) {
+        if (stage === "refine") {
+            const textToRefine = isUser ? workingText : extractTextToRefine(workingText, settings);
+            blocks.push(formatPromptMessagesForPreview("润色", buildRefineMessages(textToRefine, settings, isUser)));
+        } else if (stage === "format" && !isUser) {
+            blocks.push(formatPromptMessagesForPreview("格式检查和补全修正（单独格式模式，AI 仅返回标签内替换 JSON）", buildFormatMessages(workingText, settings, true)));
+        } else if (stage === "completion" && !isUser) {
+            blocks.push(formatPromptMessagesForPreview("回复补完", buildCompletionMessages(workingText, settings, chat.length)));
+        }
+    }
+    return blocks.join("\n\n====================\n\n");
+}
+
+function updatePromptPreview() {
+    const isUser = String($("#response_refiner_prompt_preview_type").val() || "assistant") === "user";
+    const source = String($("#response_refiner_prompt_preview_source").val() || "");
+    $("#response_refiner_prompt_preview_output").text(buildSelectedPromptPreview(source, isUser));
+}
+
+function initCollapsibleSections() {
+    const settings = getSettings();
+    settings.uiCollapsedSections = settings.uiCollapsedSections || {};
+    $("#response_refiner_container .response-refiner-section").each(function () {
+        const $section = $(this);
+        const id = String($section.data("section-id") || "");
+        const collapsed = Boolean(settings.uiCollapsedSections[id]);
+        $section.toggleClass("collapsed", collapsed);
+        $section.find("> .response-refiner-section-body").toggle(!collapsed);
+    });
+}
+
+function toggleSettingsSection($section) {
+    const settings = getSettings();
+    const id = String($section.data("section-id") || "");
+    const collapsed = !$section.hasClass("collapsed");
+    $section.toggleClass("collapsed", collapsed);
+    $section.find("> .response-refiner-section-body").slideToggle(150);
+    settings.uiCollapsedSections = settings.uiCollapsedSections || {};
+    settings.uiCollapsedSections[id] = collapsed;
+    saveSettings();
+}
+
 function renderProviderOptions() {
     const $select = $("#response_refiner_connection_type");
     $select.empty();
@@ -1090,29 +1370,31 @@ function renderFormatRules() {
     $list.empty();
 
     (settings.formatRules || []).forEach((rule, index) => {
-        const $card = $("<div>", { class: "response-refiner-rule-card", "data-index": index });
+        const ruleId = rule.id || (rule.id = crypto?.randomUUID ? crypto.randomUUID() : String(Date.now() + Math.random()));
+        const collapsed = Boolean(settings.collapsedFormatRules?.[ruleId]);
+        const $card = $("<div>", { class: `response-refiner-rule-card ${collapsed ? "collapsed" : ""}`, "data-index": index, "data-rule-id": ruleId });
         const $header = $("<div>", { class: "response-refiner-rule-header" });
-        const $enabled = $("<label>", { class: "checkbox_label" }).append(
-            $("<input>", { type: "checkbox", class: "response-refiner-rule-enabled" }).prop("checked", Boolean(rule.enabled)),
-            $("<span>", { text: `规则 ${index + 1}` }),
-        );
+        const $title = $("<div>", { class: "response-refiner-rule-title" });
+        const $toggle = $("<span>", { class: "response-refiner-rule-toggle", title: "展开/关闭规则" }).append($("<i>", { class: "fa-solid fa-chevron-down response-refiner-rule-icon" }));
+        const $enabled = $("<input>", { type: "checkbox", class: "response-refiner-rule-enabled", title: "启用规则" }).prop("checked", Boolean(rule.enabled));
+        const $name = $("<input>", { class: "text_pole response-refiner-rule-name", type: "text", title: "规则名" }).val(rule.name || `规则 ${index + 1}`);
+        $title.append($toggle, $enabled, $name);
         const $actions = $("<div>", { class: "response-refiner-rule-actions" });
         $actions.append($("<button>", { type: "button", class: "menu_button response-refiner-rule-up", text: "上移" }));
         $actions.append($("<button>", { type: "button", class: "menu_button response-refiner-rule-down", text: "下移" }));
         $actions.append($("<button>", { type: "button", class: "menu_button response-refiner-rule-delete", text: "删除" }));
-        $header.append($enabled, $actions);
+        $header.append($title, $actions);
 
-        $card.append($header);
-        $card.append($("<label>", { text: "名称" }));
-        $card.append($("<input>", { class: "text_pole response-refiner-rule-name", type: "text" }).val(rule.name || ""));
-        $card.append($("<label>", { text: "开始标签" }));
-        $card.append($("<input>", { class: "text_pole response-refiner-rule-start", type: "text", placeholder: "例如: <content>" }).val(rule.startTag || ""));
-        $card.append($("<label>", { text: "结束标签" }));
-        $card.append($("<input>", { class: "text_pole response-refiner-rule-end", type: "text", placeholder: "例如: </content>" }).val(rule.endTag || ""));
-        $card.append($("<label>", { text: "标签内提示词" }));
-        $card.append($("<textarea>", { class: "text_pole response-refiner-rule-prompt", rows: 3 }).val(rule.prompt || ""));
-        $card.append($("<label>", { text: "标签内容模板" }));
-        $card.append($("<textarea>", { class: "text_pole response-refiner-rule-template", rows: 4 }).val(rule.template || ""));
+        const $body = $("<div>", { class: "response-refiner-rule-body" }).toggle(!collapsed);
+        $body.append($("<label>", { text: "开始标签" }));
+        $body.append($("<input>", { class: "text_pole response-refiner-rule-start", type: "text", placeholder: "例如: <content>" }).val(rule.startTag || ""));
+        $body.append($("<label>", { text: "结束标签" }));
+        $body.append($("<input>", { class: "text_pole response-refiner-rule-end", type: "text", placeholder: "例如: </content>" }).val(rule.endTag || ""));
+        $body.append($("<label>", { text: "标签内提示词" }));
+        $body.append($("<textarea>", { class: "text_pole response-refiner-rule-prompt", rows: 3 }).val(rule.prompt || ""));
+        $body.append($("<label>", { text: "标签内容模板" }));
+        $body.append($("<textarea>", { class: "text_pole response-refiner-rule-template", rows: 4 }).val(rule.template || ""));
+        $card.append($header, $body);
         $list.append($card);
     });
 }
@@ -1123,7 +1405,7 @@ function syncFormatRulesFromDom() {
     $("#response_refiner_format_rules .response-refiner-rule-card").each(function () {
         const $card = $(this);
         settings.formatRules.push({
-            id: crypto?.randomUUID ? crypto.randomUUID() : String(Date.now() + Math.random()),
+            id: String($card.data("rule-id") || (crypto?.randomUUID ? crypto.randomUUID() : Date.now() + Math.random())),
             enabled: $card.find(".response-refiner-rule-enabled").prop("checked"),
             name: String($card.find(".response-refiner-rule-name").val() || ""),
             startTag: String($card.find(".response-refiner-rule-start").val() || ""),
@@ -1138,6 +1420,14 @@ function syncFormatRulesFromDom() {
 function bindSettings() {
     const settings = getSettings();
     renderProviderOptions();
+    initCollapsibleSections();
+
+    $(document).on("click keydown", "#response_refiner_container .response-refiner-section-header", function (event) {
+        if (event.type === "keydown" && event.key !== "Enter" && event.key !== " ") return;
+        if ($(event.target).is("input, textarea, select, button, .menu_button, option")) return;
+        event.preventDefault();
+        toggleSettingsSection($(this).closest(".response-refiner-section"));
+    });
 
     $("#response_refiner_connection_type")
         .val(getProviderKey())
@@ -1186,29 +1476,35 @@ function bindSettings() {
         settings.features.refineEnabled = $(this).prop("checked");
         saveSettings();
         refreshAllMessageButtons();
+        updatePromptPreview();
     });
     $("#response_refiner_format_enabled").prop("checked", settings.features.formatEnabled).on("change", function () {
         settings.features.formatEnabled = $(this).prop("checked");
         saveSettings();
         refreshAllMessageButtons();
+        updatePromptPreview();
     });
     $("#response_refiner_completion_enabled").prop("checked", settings.features.completionEnabled).on("change", function () {
         settings.features.completionEnabled = $(this).prop("checked");
         saveSettings();
         refreshAllMessageButtons();
+        updatePromptPreview();
     });
 
     $("#response_refiner_prompt").val(settings.prompt).on("input", function () {
         settings.prompt = String($(this).val());
         saveSettings();
+        updatePromptPreview();
     });
     $("#response_refiner_user_prompt").val(settings.userPrompt).on("input", function () {
         settings.userPrompt = String($(this).val());
         saveSettings();
+        updatePromptPreview();
     });
     $("#response_refiner_forbidden_phrases").val(settings.forbiddenPhrases).on("input", function () {
         settings.forbiddenPhrases = String($(this).val());
         saveSettings();
+        updatePromptPreview();
     });
     $("#response_refiner_temperature").val(settings.temperature).on("input", function () {
         settings.temperature = Number($(this).val());
@@ -1240,7 +1536,23 @@ function bindSettings() {
     $("#response_refiner_completion_context_messages").val(settings.completionContextMessages).on("input", function () {
         settings.completionContextMessages = Number($(this).val());
         saveSettings();
+        updatePromptPreview();
     });
+
+    $("#response_refiner_prompt_preview_type, #response_refiner_prompt_preview_source").on("input change", updatePromptPreview);
+    $("#response_refiner_refresh_prompt_preview").on("click", updatePromptPreview);
+
+    $("#response_refiner_open_extract_rules").on("click", function () {
+        state.extractedRules = [];
+        $("#response_refiner_extract_output").text("暂无提取结果");
+        $("#response_refiner_extract_apply").prop("disabled", true);
+        $("#response_refiner_extract_modal").show();
+    });
+    $("#response_refiner_extract_close, #response_refiner_extract_modal .response-refiner-modal-backdrop").on("click", function () {
+        $("#response_refiner_extract_modal").hide();
+    });
+    $("#response_refiner_extract_run").on("click", runExtractRules);
+    $("#response_refiner_extract_apply").on("click", applyExtractedRules);
 
     renderFormatRules();
     $("#response_refiner_add_format_rule").on("click", function () {
@@ -1256,6 +1568,18 @@ function bindSettings() {
         });
         saveSettings();
         renderFormatRules();
+    });
+
+    $(document).on("click", ".response-refiner-rule-toggle", function () {
+        const settings = getSettings();
+        const $card = $(this).closest(".response-refiner-rule-card");
+        const ruleId = String($card.data("rule-id") || "");
+        const collapsed = !$card.hasClass("collapsed");
+        $card.toggleClass("collapsed", collapsed);
+        $card.find(".response-refiner-rule-body").slideToggle(150);
+        settings.collapsedFormatRules = settings.collapsedFormatRules || {};
+        settings.collapsedFormatRules[ruleId] = collapsed;
+        saveSettings();
     });
 
     $(document).on("input change", "#response_refiner_format_rules input, #response_refiner_format_rules textarea", syncFormatRulesFromDom);
@@ -1287,6 +1611,7 @@ function bindSettings() {
 
     $("#response_refiner_toggle_comparison").on("click", toggleComparisonPanel);
     updateConnectionTypeUI();
+    updatePromptPreview();
 }
 
 function refreshAllMessageButtons() {
@@ -1344,6 +1669,10 @@ $(document).on("click", ".response-refiner-run", async function () {
     const feature = String($(this).data("feature"));
     if (feature === "busy") return;
     await requestFeature(messageId, feature);
+});
+
+$(document).on("click", ".response-refiner-stop", function () {
+    stopRequest(Number($(this).data("message-id")));
 });
 
 $(document).on("click", ".response-refiner-apply", async function () {

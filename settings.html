@@ -5,121 +5,205 @@
             <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
         </div>
         <div class="inline-drawer-content">
-            <div class="response-refiner-section">
-                <h4>连接设置</h4>
-                <label for="response_refiner_connection_type">连接方式</label>
-                <select id="response_refiner_connection_type" class="text_pole marginBot8"></select>
+            <div class="response-refiner-section" data-section-id="connection">
+                <div class="response-refiner-section-header" role="button" tabindex="0">
+                    <h4>连接设置</h4>
+                    <i class="fa-solid fa-chevron-down response-refiner-section-icon"></i>
+                </div>
+                <div class="response-refiner-section-body">
+                    <label for="response_refiner_connection_type">连接方式</label>
+                    <select id="response_refiner_connection_type" class="text_pole marginBot8"></select>
 
-                <label id="response_refiner_endpoint_label" for="response_refiner_endpoint">接口地址</label>
-                <input id="response_refiner_endpoint" class="text_pole marginBot8" type="text" autocomplete="off" />
+                    <label id="response_refiner_endpoint_label" for="response_refiner_endpoint">接口地址</label>
+                    <input id="response_refiner_endpoint" class="text_pole marginBot8" type="text" autocomplete="off" />
 
-                <label for="response_refiner_model_select">模型列表</label>
-                <div class="flex-container gap8px marginBot8">
-                    <select id="response_refiner_model_select" class="text_pole flex1">
-                        <option value="">未加载模型列表，可手动输入</option>
+                    <label for="response_refiner_model_select">模型列表</label>
+                    <div class="flex-container gap8px marginBot8 response-refiner-button-row">
+                        <select id="response_refiner_model_select" class="text_pole flex1">
+                            <option value="">未加载模型列表，可手动输入</option>
+                        </select>
+                        <div id="response_refiner_refresh_models" class="menu_button response-refiner-menu-button" title="刷新模型列表">
+                            <i class="fa-solid fa-arrows-rotate"></i><span>刷新</span>
+                        </div>
+                    </div>
+
+                    <label for="response_refiner_model_manual">模型名称（手动输入兜底）</label>
+                    <input id="response_refiner_model_manual" class="text_pole marginBot8" type="text" autocomplete="off" placeholder="模型列表获取失败时可手动填写" />
+
+                    <label for="response_refiner_api_key_input">API Key</label>
+                    <div class="flex-container gap8px marginBot8 response-refiner-button-row">
+                        <input id="response_refiner_api_key_input" class="text_pole flex1" type="password" autocomplete="off" placeholder="输入 API Key" />
+                        <div id="response_refiner_api_key_toggle" class="menu_button response-refiner-menu-button" title="显示/隐藏">
+                            <i class="fa-solid fa-eye"></i><span>显示</span>
+                        </div>
+                        <div id="response_refiner_test_connection" class="menu_button response-refiner-menu-button">
+                            <i class="fa-solid fa-plug"></i><span>测试连接</span>
+                        </div>
+                    </div>
+                    <div class="response-refiner-note marginBot8">
+                        API Key 和接口地址保存在本地 SillyTavern 设置中。发布到 GitHub 前需要确认仓库文件中不包含任何已保存地址、密钥或个人路径。
+                    </div>
+                </div>
+            </div>
+
+            <div class="response-refiner-section" data-section-id="features">
+                <div class="response-refiner-section-header" role="button" tabindex="0">
+                    <h4>功能开关</h4>
+                    <i class="fa-solid fa-chevron-down response-refiner-section-icon"></i>
+                </div>
+                <div class="response-refiner-section-body">
+                    <label class="checkbox_label">
+                        <input id="response_refiner_refine_enabled" type="checkbox" />
+                        <span>启用润色（八股文替换/移除整合在润色提示词内）</span>
+                    </label>
+                    <label class="checkbox_label">
+                        <input id="response_refiner_format_enabled" type="checkbox" />
+                        <span>启用格式检查和补全修正（仅 AI 回复）</span>
+                    </label>
+                    <label class="checkbox_label">
+                        <input id="response_refiner_completion_enabled" type="checkbox" />
+                        <span>启用回复补完（仅 AI 回复，配合格式规则）</span>
+                    </label>
+                    <div class="response-refiner-note marginTop5">
+                        AI 回复消息上的“执行已选”按钮会按润色 → 格式检查 → 回复补完的顺序执行当前勾选功能。用户输入只显示润色按钮。
+                    </div>
+                </div>
+            </div>
+
+            <div class="response-refiner-section" data-section-id="refine">
+                <div class="response-refiner-section-header" role="button" tabindex="0">
+                    <h4>润色设置</h4>
+                    <i class="fa-solid fa-chevron-down response-refiner-section-icon"></i>
+                </div>
+                <div class="response-refiner-section-body">
+                    <label for="response_refiner_prompt">AI 回复润色提示词</label>
+                    <textarea id="response_refiner_prompt" class="text_pole marginBot8" rows="5" placeholder="输入针对 AI 回复文本的润色指令"></textarea>
+
+                    <label for="response_refiner_user_prompt">用户输入润色提示词</label>
+                    <textarea id="response_refiner_user_prompt" class="text_pole marginBot8" rows="5" placeholder="输入针对用户输入文本的润色指令"></textarea>
+
+                    <label for="response_refiner_forbidden_phrases">八股文禁用字符/短语（逗号分隔）</label>
+                    <textarea id="response_refiner_forbidden_phrases" class="text_pole marginBot8" rows="3" placeholder="例如：综上所述,总而言之,值得注意的是"></textarea>
+                    <div class="response-refiner-note marginBot8">
+                        这些内容不会生成独立按钮，会在润色提示词中要求模型替换或移除原文与输出中的对应内容。
+                    </div>
+
+                    <label for="response_refiner_filter_enabled" class="checkbox_label">
+                        <input id="response_refiner_filter_enabled" type="checkbox" />
+                        <span>启用正则过滤（AI 回复只润色最后一个匹配部分）</span>
+                    </label>
+                    <label for="response_refiner_filter_regex">润色捕获正则</label>
+                    <input id="response_refiner_filter_regex" class="text_pole marginBot8" type="text" placeholder="例如: <content>([\s\S]*?)</content>" />
+                </div>
+            </div>
+
+            <div class="response-refiner-section" data-section-id="generation">
+                <div class="response-refiner-section-header" role="button" tabindex="0">
+                    <h4>生成参数</h4>
+                    <i class="fa-solid fa-chevron-down response-refiner-section-icon"></i>
+                </div>
+                <div class="response-refiner-section-body">
+                    <label for="response_refiner_temperature">Temperature: <span id="response_refiner_temperature_value">0.70</span></label>
+                    <input id="response_refiner_temperature" class="marginBot8" type="range" min="0" max="1.5" step="0.05" />
+
+                    <label for="response_refiner_max_tokens">最大输出 Tokens</label>
+                    <input id="response_refiner_max_tokens" class="text_pole marginBot8" type="number" min="32" max="8192" step="1" />
+                </div>
+            </div>
+
+            <div class="response-refiner-section" data-section-id="prompt-preview">
+                <div class="response-refiner-section-header" role="button" tabindex="0">
+                    <h4>当前已勾选功能完整提示词预览</h4>
+                    <i class="fa-solid fa-chevron-down response-refiner-section-icon"></i>
+                </div>
+                <div class="response-refiner-section-body">
+                    <div class="response-refiner-note marginBot8">
+                        这里会按当前功能开关、消息类型和执行顺序展示将发送给模型的完整 system/user 内容。预览不会发起请求。
+                    </div>
+                    <label for="response_refiner_prompt_preview_type">消息类型</label>
+                    <select id="response_refiner_prompt_preview_type" class="text_pole marginBot8">
+                        <option value="assistant">AI 回复</option>
+                        <option value="user">用户输入</option>
                     </select>
-                    <div id="response_refiner_refresh_models" class="menu_button" title="刷新模型列表">
-                        <i class="fa-solid fa-arrows-rotate"></i>
+                    <label for="response_refiner_prompt_preview_source">预览输入文本</label>
+                    <textarea id="response_refiner_prompt_preview_source" class="text_pole marginBot8" rows="5" placeholder="粘贴一段回复或用户输入，用来生成实际提示词预览"></textarea>
+                    <div id="response_refiner_refresh_prompt_preview" class="menu_button response-refiner-menu-button marginBot8">
+                        <i class="fa-solid fa-arrows-rotate"></i><span>刷新提示词预览</span>
                     </div>
+                    <pre id="response_refiner_prompt_preview_output" class="response-refiner-prompt-preview-output">暂无预览</pre>
                 </div>
+            </div>
 
-                <label for="response_refiner_model_manual">模型名称（手动输入兜底）</label>
-                <input id="response_refiner_model_manual" class="text_pole marginBot8" type="text" autocomplete="off" placeholder="模型列表获取失败时可手动填写" />
-
-                <label for="response_refiner_api_key_input">API Key</label>
-                <div class="flex-container gap8px marginBot8">
-                    <input id="response_refiner_api_key_input" class="text_pole flex1" type="password" autocomplete="off" placeholder="输入 API Key" />
-                    <div id="response_refiner_api_key_toggle" class="menu_button" title="显示/隐藏">
-                        <i class="fa-solid fa-eye"></i>
+            <div class="response-refiner-section" data-section-id="format">
+                <div class="response-refiner-section-header" role="button" tabindex="0">
+                    <h4>格式检查和补全修正</h4>
+                    <i class="fa-solid fa-chevron-down response-refiner-section-icon"></i>
+                </div>
+                <div class="response-refiner-section-body">
+                    <div class="response-refiner-note marginBot8">
+                        每条规则代表一个成对标签。规则顺序就是检查顺序，可用上移/下移调整。单独执行该功能时，AI 只输出各标签内替换内容，脚本再回填到原文标签内以减少输出 token。
                     </div>
-                    <div id="response_refiner_test_connection" class="menu_button">
-                        <i class="fa-solid fa-plug"></i> 测试连接
+                    <div class="response-refiner-button-row marginBot8">
+                        <div id="response_refiner_add_format_rule" class="menu_button response-refiner-menu-button">
+                            <i class="fa-solid fa-plus"></i><span>新增标签规则</span>
+                        </div>
+                        <div id="response_refiner_open_extract_rules" class="menu_button response-refiner-menu-button">
+                            <i class="fa-solid fa-wand-magic-sparkles"></i><span>自动提取格式规则</span>
+                        </div>
                     </div>
-                </div>
-                <div class="response-refiner-note marginBot8">
-                    API Key 和接口地址保存在本地 SillyTavern 设置中。发布到 GitHub 前需要确认仓库文件中不包含任何已保存地址、密钥或个人路径。
+                    <div id="response_refiner_format_rules"></div>
                 </div>
             </div>
 
-            <div class="response-refiner-section">
-                <h4>功能开关</h4>
-                <label class="checkbox_label">
-                    <input id="response_refiner_refine_enabled" type="checkbox" />
-                    <span>启用润色（八股文替换/移除整合在润色提示词内）</span>
-                </label>
-                <label class="checkbox_label">
-                    <input id="response_refiner_format_enabled" type="checkbox" />
-                    <span>启用格式检查和补全修正（仅 AI 回复）</span>
-                </label>
-                <label class="checkbox_label">
-                    <input id="response_refiner_completion_enabled" type="checkbox" />
-                    <span>启用回复补完（仅 AI 回复，配合格式规则）</span>
-                </label>
-                <div class="response-refiner-note marginTop5">
-                    消息上的“执行已选”按钮会按润色 → 格式检查 → 回复补完的顺序执行当前勾选功能。用户输入只执行润色。
+            <div class="response-refiner-section" data-section-id="completion">
+                <div class="response-refiner-section-header" role="button" tabindex="0">
+                    <h4>回复补完</h4>
+                    <i class="fa-solid fa-chevron-down response-refiner-section-icon"></i>
                 </div>
-            </div>
+                <div class="response-refiner-section-body">
+                    <label for="response_refiner_completion_outline_regex">大纲捕获正则</label>
+                    <input id="response_refiner_completion_outline_regex" class="text_pole marginBot8" type="text" placeholder="例如: <outline>([\s\S]*?)</outline>" />
+                    <div class="response-refiner-note marginBot8">
+                        如果正则匹配到捕获组，会将最后一个捕获结果作为大纲上下文；没有匹配时使用用户最后一次输入作为上下文。
+                    </div>
 
-            <div class="response-refiner-section">
-                <h4>润色设置</h4>
-                <label for="response_refiner_prompt">AI 回复润色提示词</label>
-                <textarea id="response_refiner_prompt" class="text_pole marginBot8" rows="5" placeholder="输入针对 AI 回复文本的润色指令"></textarea>
+                    <label for="response_refiner_completion_prompt">回复补完提示词</label>
+                    <textarea id="response_refiner_completion_prompt" class="text_pole marginBot8" rows="4"></textarea>
 
-                <label for="response_refiner_user_prompt">用户输入润色提示词</label>
-                <textarea id="response_refiner_user_prompt" class="text_pole marginBot8" rows="5" placeholder="输入针对用户输入文本的润色指令"></textarea>
-
-                <label for="response_refiner_forbidden_phrases">八股文禁用字符/短语（逗号分隔）</label>
-                <textarea id="response_refiner_forbidden_phrases" class="text_pole marginBot8" rows="3" placeholder="例如：综上所述,总而言之,值得注意的是"></textarea>
-                <div class="response-refiner-note marginBot8">
-                    这些内容不会生成独立按钮，会在润色提示词中要求模型替换或移除原文与输出中的对应内容。
+                    <label for="response_refiner_completion_context_messages">补完时附带最近消息数量</label>
+                    <input id="response_refiner_completion_context_messages" class="text_pole marginBot8" type="number" min="0" max="20" step="1" />
                 </div>
-
-                <label for="response_refiner_filter_enabled" class="checkbox_label">
-                    <input id="response_refiner_filter_enabled" type="checkbox" />
-                    <span>启用正则过滤（AI 回复只润色最后一个匹配部分）</span>
-                </label>
-                <label for="response_refiner_filter_regex">润色捕获正则</label>
-                <input id="response_refiner_filter_regex" class="text_pole marginBot8" type="text" placeholder="例如: <content>([\s\S]*?)</content>" />
-            </div>
-
-            <div class="response-refiner-section">
-                <h4>生成参数</h4>
-                <label for="response_refiner_temperature">Temperature: <span id="response_refiner_temperature_value">0.70</span></label>
-                <input id="response_refiner_temperature" class="marginBot8" type="range" min="0" max="1.5" step="0.05" />
-
-                <label for="response_refiner_max_tokens">最大输出 Tokens</label>
-                <input id="response_refiner_max_tokens" class="text_pole marginBot8" type="number" min="32" max="8192" step="1" />
-            </div>
-
-            <div class="response-refiner-section">
-                <h4>格式检查和补全修正</h4>
-                <div class="response-refiner-note marginBot8">
-                    每条规则代表一个成对标签。规则顺序就是检查顺序，可用上移/下移调整。
-                </div>
-                <div id="response_refiner_format_rules"></div>
-                <div id="response_refiner_add_format_rule" class="menu_button marginTop5">
-                    <i class="fa-solid fa-plus"></i> 新增标签规则
-                </div>
-            </div>
-
-            <div class="response-refiner-section">
-                <h4>回复补完</h4>
-                <label for="response_refiner_completion_outline_regex">大纲捕获正则</label>
-                <input id="response_refiner_completion_outline_regex" class="text_pole marginBot8" type="text" placeholder="例如: <outline>([\s\S]*?)</outline>" />
-                <div class="response-refiner-note marginBot8">
-                    如果正则匹配到捕获组，会将最后一个捕获结果作为大纲上下文；没有匹配时使用用户最后一次输入作为上下文。
-                </div>
-
-                <label for="response_refiner_completion_prompt">回复补完提示词</label>
-                <textarea id="response_refiner_completion_prompt" class="text_pole marginBot8" rows="4"></textarea>
-
-                <label for="response_refiner_completion_context_messages">补完时附带最近消息数量</label>
-                <input id="response_refiner_completion_context_messages" class="text_pole marginBot8" type="number" min="0" max="20" step="1" />
             </div>
 
             <div class="response-refiner-note">
-                消息按钮：润色、格式检查、回复补完、执行已选、替换、恢复。所有预览内容使用文本方式渲染，避免 HTML 注入。
+                消息按钮：润色、格式检查、回复补完、执行已选、停止、替换、恢复。所有预览内容使用文本方式渲染，避免 HTML 注入。
             </div>
         </div>
+    </div>
+</div>
+
+<div id="response_refiner_extract_modal" class="response-refiner-modal" style="display:none;">
+    <div class="response-refiner-modal-backdrop"></div>
+    <div class="response-refiner-modal-content">
+        <div class="response-refiner-modal-header">
+            <h3>自动提取格式规则</h3>
+            <button id="response_refiner_extract_close" type="button" class="menu_button response-refiner-menu-button">
+                <i class="fa-solid fa-xmark"></i><span>关闭</span>
+            </button>
+        </div>
+        <div class="response-refiner-note marginBot8">
+            粘贴一段完整回复后，脚本会先提取成对标签，再让 AI 一次性为每个标签生成规则名、标签内提示词和模板。确认后会追加到现有规则列表。
+        </div>
+        <label for="response_refiner_extract_source">完整回复样例</label>
+        <textarea id="response_refiner_extract_source" class="text_pole marginBot8" rows="10" placeholder="在这里粘贴完整回复"></textarea>
+        <div class="response-refiner-button-row marginBot8">
+            <button id="response_refiner_extract_run" type="button" class="menu_button response-refiner-menu-button">
+                <i class="fa-solid fa-wand-magic-sparkles"></i><span>提取并生成规则</span>
+            </button>
+            <button id="response_refiner_extract_apply" type="button" class="menu_button response-refiner-menu-button" disabled>
+                <i class="fa-solid fa-check"></i><span>追加到规则列表</span>
+            </button>
+        </div>
+        <pre id="response_refiner_extract_output" class="response-refiner-prompt-preview-output">暂无提取结果</pre>
     </div>
 </div>
