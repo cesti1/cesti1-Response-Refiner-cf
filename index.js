@@ -1,8 +1,5 @@
 import * as SillyTavern from "../../../script.js";
-import {
-    extension_settings,
-    renderExtensionTemplateAsync,
-} from "../../extensions.js";
+import * as Extensions from "../../extensions.js";
 
 const {
     chat,
@@ -11,6 +8,9 @@ const {
     saveChatConditional,
     saveSettingsDebounced,
 } = SillyTavern;
+
+const extension_settings = Extensions.extension_settings || {};
+const renderExtensionTemplateAsync = Extensions.renderExtensionTemplateAsync;
 
 function updateMessageBlockCompat(messageId, message) {
     if (typeof SillyTavern.updateMessageBlock === "function") {
@@ -1298,8 +1298,20 @@ function refreshAllMessageButtons() {
     }
 }
 
+async function loadSettingsHtml() {
+    if (typeof renderExtensionTemplateAsync === "function") {
+        return renderExtensionTemplateAsync(MODULE_NAME, "settings");
+    }
+
+    const response = await fetch(`/scripts/extensions/third-party/${MODULE_NAME}/settings.html`);
+    if (!response.ok) {
+        throw new Error(`无法加载 settings.html: ${response.status} ${response.statusText}`);
+    }
+    return response.text();
+}
+
 async function addUi() {
-    const settingsHtml = await renderExtensionTemplateAsync(MODULE_NAME, "settings");
+    const settingsHtml = await loadSettingsHtml();
     $("#extensions_settings2").append(settingsHtml);
 
     const $panel = $("<div>", { id: "response_refiner_comparison_panel" }).hide();
@@ -1335,15 +1347,24 @@ $(document).on("click", ".response-refiner-restore", async function () {
 });
 
 $(async () => {
-    if (state.initialized) return;
-    state.initialized = true;
-    getSettings();
-    await addUi();
-    bindSettings();
+    try {
+        if (state.initialized) return;
+        state.initialized = true;
+        getSettings();
+        await addUi();
+        bindSettings();
 
-    eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, onCharacterMessageRendered);
-    eventSource.on(event_types.MESSAGE_UPDATED, onCharacterMessageRendered);
-    eventSource.on(event_types.CHAT_CHANGED, refreshAllMessageButtons);
-    refreshAllMessageButtons();
+        eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, onCharacterMessageRendered);
+        if (event_types.MESSAGE_UPDATED) {
+            eventSource.on(event_types.MESSAGE_UPDATED, onCharacterMessageRendered);
+        }
+        eventSource.on(event_types.CHAT_CHANGED, refreshAllMessageButtons);
+        refreshAllMessageButtons();
+        console.info("[Response Refiner] 扩展加载完成");
+    } catch (error) {
+        state.initialized = false;
+        console.error("[Response Refiner] 扩展初始化失败:", error);
+        toastr?.error?.(error instanceof Error ? error.message : String(error), "Response Refiner 初始化失败");
+    }
 });
 
