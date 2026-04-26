@@ -1,15 +1,30 @@
-﻿import {
+import * as SillyTavern from "../../../script.js";
+import {
+    extension_settings,
+    renderExtensionTemplateAsync,
+} from "../../extensions.js";
+
+const {
     chat,
     event_types,
     eventSource,
     saveChatConditional,
     saveSettingsDebounced,
-    updateMessageBlock,
-} from "../../../script.js";
-import {
-    extension_settings,
-    renderExtensionTemplateAsync,
-} from "../../extensions.js";
+} = SillyTavern;
+
+function updateMessageBlockCompat(messageId, message) {
+    if (typeof SillyTavern.updateMessageBlock === "function") {
+        SillyTavern.updateMessageBlock(messageId, message);
+        return;
+    }
+
+    const text = String(message?.mes ?? "");
+    const $messageBlock = $(`#chat .mes[mesid="${messageId}"]`);
+    const $text = $messageBlock.find(".mes_text");
+    if ($text.length) {
+        $text.text(text);
+    }
+}
 
 const MODULE_NAME = "cesti1-Response-Refiner-cf";
 const SETTINGS_KEY = /** @type {const} */ ("response_refiner");
@@ -903,7 +918,7 @@ async function applyCandidate(messageId) {
     message.mes = refinerData.candidate_text;
     refinerData.applied = true;
     await saveChatConditional();
-    updateMessageBlock(resolvedId, message);
+    updateMessageBlockCompat(resolvedId, message);
     updateMessageButtons(resolvedId);
     updateComparisonPanel(resolvedId);
     toastr.success("已替换为候选结果", "替换");
@@ -922,7 +937,7 @@ async function restoreOriginal(messageId) {
     message.mes = refinerData.full_original_text;
     refinerData.applied = false;
     await saveChatConditional();
-    updateMessageBlock(resolvedId, message);
+    updateMessageBlockCompat(resolvedId, message);
     updateMessageButtons(resolvedId);
     updateComparisonPanel(resolvedId);
     toastr.success("已恢复原文", "恢复");
