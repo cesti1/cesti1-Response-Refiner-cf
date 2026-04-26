@@ -1,0 +1,21 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Logs and local temp files
+*.log
+*.tmp
+*.bak
+fix_escape.ps1
+
+# Dependency folders if added locally
+node_modules/
+
+# Local secrets / env files
+.env
+.env.*
+*.key
+*.pem
+*.p12
