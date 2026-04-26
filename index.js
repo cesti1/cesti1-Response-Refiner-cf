@@ -144,9 +144,11 @@ const DEFAULT_SETTINGS = {
             template: "<content>\n这里填写正文内容\n</content>",
         },
     ],
+    completionChainRegex: "",
     completionOutlineRegex: "",
-    completionPrompt: "如果当前 AI 回复被截断，请根据格式规则、可用大纲或用户最后一次输入继续补完。只输出续写部分，不要重复已经存在的内容，不要解释。",
-    completionContextMessages: 6,
+    completionPrompt: "如果当前 AI 回复被截断，请根据格式规则、可用思维链或需要补完回复的上一条用户消息继续补完。只输出续写或缺失标签内容，不要解释。",
+    completionContextMessages: 0,
+    streamStatusEnabled: false,
     uiCollapsedSections: {},
     collapsedFormatRules: {},
 };
@@ -157,6 +159,7 @@ const state = {
     initialized: false,
     busyMessageIds: new Set(),
     requestControllers: new Map(),
+    statusBuffers: new Map(),
     comparisonPanelVisible: false,
     extractedRules: [],
 };
@@ -216,6 +219,10 @@ function migrateLegacySettings(settings) {
         settings.providers.openrouter.endpoint = settings.providers.openrouter.endpoint || settings.openrouterEndpoint || PROVIDERS.openrouter.defaultEndpoint;
         settings.providers.openrouter.model = settings.providers.openrouter.model || settings.openrouterModel || "";
         settings.providers.openrouter.apiKey = settings.providers.openrouter.apiKey || settings.openrouterApiKey || "";
+    }
+
+    if (settings.completionChainRegex === undefined && settings.completionOutlineRegex !== undefined) {
+        settings.completionChainRegex = settings.completionOutlineRegex || "";
     }
 }
 
@@ -394,7 +401,7 @@ function replaceRefinedText(originalText, refinedText, settings) {
     }
 }
 
-function extractOutlineContext(text, regexText) {
+function extractChainContext(text, regexText) {
     const pattern = String(regexText || "").trim();
     if (!pattern) {
         return "";
@@ -412,10 +419,63 @@ function extractOutlineContext(text, regexText) {
         }
         return matches.length ? String(matches[matches.length - 1]).trim() : "";
     } catch (error) {
-        console.error("[Response Refiner] 大纲捕获正则错误:", error);
-        toastr.warning("大纲捕获正则错误，已改用最后一次用户输入", "回复补完");
+        console.error("[Response Refiner] 思维链捕获正则错误:", error);
+        toastr.warning("思维链捕获正则错误，已仅使用上一条用户消息", "回复补完");
         return "";
     }
+}
+
+function inferBodyTagsFromFilterRegex(regexText) {
+    const text = String(regexText || "").trim();
+    const match = text.match(/^<([a-zA-Z][\w:-]*)\b[^>]*>\s*\(\[\\s\\S\]\*\?\)\s*<\/\1>$/)
+        || text.match(/^<([a-zA-Z][\w:-]*)\b[^>]*>\(\[\\s\\S\]\*\?\)<\/\1>$/)
+        || text.match(/^<([a-zA-Z][\w:-]*)\b[^>]*>\(\.\*\?\)<\/\1>$/);
+    if (!match) return null;
+    return { tag: match[1], startTag: `<${match[1]}>`, endTag: `</${match[1]}>` };
+}
+
+function getBodyRuleInfo(settings, notify = false) {
+    const inferred = inferBodyTagsFromFilterRegex(settings.filterRegex);
+    if (!inferred) {
+        if (notify && settings.filterEnabled) {
+            toastr.warning("润色捕获正则过复杂，无法自动识别正文标签；请确保正文规则标签与润色捕获正则一致。", "正文规则");
+        }
+        return { rule: null, key: "", startTag: "", endTag: "", inferred: null };
+    }
+
+    let rule = (settings.formatRules || []).find(item => item && item.startTag === inferred.startTag && item.endTag === inferred.endTag);
+    if (!rule) {
+        rule = (settings.formatRules || []).find(item => item && (item.id === "content" || item.name === "正文"));
+    }
+    if (!rule) {
+        rule = {
+            id: "content",
+            enabled: true,
+            name: "正文",
+            startTag: inferred.startTag,
+            endTag: inferred.endTag,
+            prompt: "正文内容需要完整、连贯、符合上下文语气。",
+            template: `${inferred.startTag}
+这里填写正文内容
+${inferred.endTag}`,
+        };
+        settings.formatRules = settings.formatRules || [];
+        settings.formatRules.unshift(rule);
+    }
+    rule.id = rule.id || "content";
+    rule.enabled = true;
+    rule.name = "正文";
+    rule.startTag = inferred.startTag;
+    rule.endTag = inferred.endTag;
+    if (!rule.prompt) rule.prompt = "正文内容需要完整、连贯、符合上下文语气。";
+    if (!rule.template) rule.template = `${inferred.startTag}
+这里填写正文内容
+${inferred.endTag}`;
+    return { rule, key: getRuleKey(rule), startTag: inferred.startTag, endTag: inferred.endTag, inferred };
+}
+
+function ensureBodyRule(settings, notify = false) {
+    return getBodyRuleInfo(settings, notify);
 }
 
 function getEnabledFormatRules(settings) {
@@ -467,18 +527,35 @@ function extractTaggedSegments(text, rules) {
     });
 }
 
+function getNonBodyFormatRules(settings) {
+    const body = getBodyRuleInfo(settings, false);
+    return getEnabledFormatRules(settings).filter(rule => getRuleKey(rule) !== body.key);
+}
+
+function buildFormatRulesTextForRules(rules) {
+    if (!rules.length) return "未配置启用的非正文格式标签规则。";
+    return rules.map((rule, index) => [
+        `${index + 1}. ${rule.name || "未命名标签"}`,
+        `规则ID：${getRuleKey(rule)}`,
+        `开始标签：${rule.startTag}`,
+        `结束标签：${rule.endTag}`,
+        `标签内提示词：${rule.prompt || "无"}`,
+        `标签内容模板：\n${rule.template || `${rule.startTag}\n\n${rule.endTag}`}`,
+    ].join("\n")).join("\n\n");
+}
+
 function buildFormatReplacementPromptText(sourceText, settings) {
-    const rules = getEnabledFormatRules(settings);
+    const rules = getNonBodyFormatRules(settings);
     const segments = extractTaggedSegments(sourceText, rules);
     return [
         "你是 AI 回复格式检查和补全修正助手。",
-        "你会收到完整 AI 回复、格式标签规则、每个标签内当前内容。",
-        "你的任务是修正每个已启用规则对应标签内部的文本，使其满足标签提示词和模板要求。",
+        "你只处理非正文标签；正文标签由润色功能处理，禁止输出或修改正文规则对应的内容。",
+        "你的任务是修正每个非正文规则对应标签内部的文本，使其满足标签提示词和模板要求。",
         "为了减少输出 token，你绝对不要输出完整回复、开始标签、结束标签、解释或 Markdown 代码块。",
         "你必须只输出一个 JSON 对象，键为规则ID，值为该规则标签内修正后的纯文本。",
-        "如果某个标签不存在但规则要求补全，请仍在对应规则ID里输出应插入的标签内文本。",
+        "如果某个非正文标签不存在但规则要求补全，请仍在对应规则ID里输出应插入的标签内文本。",
         "格式标签规则：",
-        buildFormatRulesText(settings),
+        buildFormatRulesTextForRules(rules),
         "当前标签内内容：",
         JSON.stringify(Object.fromEntries(segments.map(item => [item.key, item.content])), null, 2),
         "完整 AI 回复文本仍作为上下文提供，但不要完整复述：",
@@ -522,31 +599,30 @@ function buildFormatMessages(sourceText, settings, replacementOnly = false) {
     ];
 }
 
-function buildCompletionMessages(sourceText, settings, messageId) {
-    const outline = extractOutlineContext(sourceText, settings.completionOutlineRegex);
-    const latestUser = getLatestUserMessage(messageId);
-    const latestUserText = latestUser.message ? getMessageText(latestUser.message) : "";
-    const recentContext = getRecentContext(messageId, settings.completionContextMessages);
-    const contextKind = outline ? "大纲捕获正则匹配到的大纲上下文" : "用户最后一次输入上下文";
-    const contextText = outline || latestUserText || "未找到可用上下文";
+function buildCompletionMessages(sourceText, settings, messageId, missingRules = []) {
+    const chain = extractChainContext(sourceText, settings.completionChainRegex || settings.completionOutlineRegex);
+    const previousUser = getLatestUserMessage(messageId);
+    const previousUserText = previousUser.message ? getMessageText(previousUser.message) : "";
+    const missingText = missingRules.length ? buildFormatRulesTextForRules(missingRules) : "无明确缺失标签，仅按截断位置补完。";
 
     const system = [
-        "你是 AI 回复补完助手。当前 AI 回复可能被截断。",
+        "你是 AI 回复补完助手。当前 AI 回复可能被截断或缺少部分标签。",
         "你必须配合格式检查规则继续生成剩余部分，续写内容需要满足标签顺序、开始标签、结束标签、标签内提示词和模板要求。",
-        "优先依据大纲上下文补完；如果没有大纲，则依据用户最后一次输入补完。",
-        "只输出续写部分，不要重复已经存在的内容，不要输出说明、标题或分析。",
+        "补完依据：需要补完回复的上一条用户消息始终是主上下文；如果提供思维链，则结合思维链和上一条用户消息；没有思维链时只依靠上一条用户消息。",
+        "如果正文标签已开始但未完成，允许从正文开头或截断处继续补完，并遵守正文规则；格式修正阶段之后不会处理正文标签。",
+        "只输出续写或缺失标签内容，不要重复已经存在的完整内容，不要输出说明、标题或分析。",
         settings.completionPrompt || "",
-        "格式标签规则：",
+        "全部格式标签规则：",
         buildFormatRulesText(settings),
     ].filter(Boolean).join("\n");
 
     const user = [
-        `上下文类型：${contextKind}`,
-        `上下文内容：\n${contextText}`,
-        recentContext ? `最近对话摘录：\n${recentContext}` : "",
+        `上一条用户消息：\n${previousUserText || "未找到上一条用户消息"}`,
+        chain ? `参考思维链：\n${chain}` : "参考思维链：未匹配到，禁止自行编造思维链。",
+        `当前缺失或需要关注的标签规则：\n${missingText}`,
         `已经生成但可能被截断的 AI 回复：\n${sourceText}`,
-        "请从截断处继续补完，只输出续写部分。",
-    ].filter(Boolean).join("\n\n---\n\n");
+        "请只输出需要追加到当前回复末尾的内容。",
+    ].join("\n\n---\n\n");
 
     return [
         { role: "system", content: system },
@@ -578,6 +654,8 @@ async function callAI(messages, options = {}) {
     const maxTokens = Number(options.maxTokens || settings.maxTokens) || DEFAULT_SETTINGS.maxTokens;
     const temperature = Number(options.temperature ?? settings.temperature) || 0;
     const signal = options.signal;
+    const onToken = typeof options.onToken === "function" ? options.onToken : null;
+    const stream = Boolean(options.stream && onToken);
 
     if (!endpoint || !model) {
         throw new Error("请先配置接口地址和模型");
@@ -587,17 +665,19 @@ async function callAI(messages, options = {}) {
     }
 
     if (provider.apiStyle === "gemini") {
+        if (onToken) onToken("[Gemini 暂使用非流式请求，正在等待完整响应...]\n");
         return callGemini(endpoint, model, apiKey, messages, temperature, maxTokens, signal);
     }
 
     if (provider.apiStyle === "claude") {
+        if (onToken) onToken("[Claude 暂使用非流式请求，正在等待完整响应...]\n");
         return callClaude(endpoint, model, apiKey, messages, temperature, maxTokens, signal);
     }
 
-    return callOpenAICompatible(providerKey, endpoint, model, apiKey, messages, temperature, maxTokens, signal);
+    return callOpenAICompatible(providerKey, endpoint, model, apiKey, messages, temperature, maxTokens, signal, stream, onToken);
 }
 
-async function callOpenAICompatible(providerKey, endpoint, model, apiKey, messages, temperature, maxTokens, signal) {
+async function callOpenAICompatible(providerKey, endpoint, model, apiKey, messages, temperature, maxTokens, signal, stream = false, onToken = null) {
     const response = await fetch(`${endpoint}/chat/completions`, {
         method: "POST",
         headers: getOpenAICompatibleHeaders(providerKey, apiKey),
@@ -607,8 +687,13 @@ async function callOpenAICompatible(providerKey, endpoint, model, apiKey, messag
             messages,
             temperature,
             max_tokens: maxTokens,
+            stream,
         }),
     });
+
+    if (stream && response.ok && response.body) {
+        return readOpenAIStream(response, onToken);
+    }
 
     const data = await safeJson(response);
     if (!response.ok) {
@@ -621,6 +706,37 @@ async function callOpenAICompatible(providerKey, endpoint, model, apiKey, messag
     }
 
     return stripCodeFence(content);
+}
+
+async function readOpenAIStream(response, onToken) {
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder("utf-8");
+    let buffer = "";
+    let result = "";
+    while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split(/\r?\n/);
+        buffer = lines.pop() || "";
+        for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed || !trimmed.startsWith("data:")) continue;
+            const payload = trimmed.slice(5).trim();
+            if (payload === "[DONE]") continue;
+            try {
+                const data = JSON.parse(payload);
+                const token = data?.choices?.[0]?.delta?.content || data?.choices?.[0]?.text || "";
+                if (token) {
+                    result += token;
+                    onToken?.(token);
+                }
+            } catch (_error) {
+                // 忽略单行非 JSON 流片段。
+            }
+        }
+    }
+    return stripCodeFence(result);
 }
 
 async function callGemini(endpoint, model, apiKey, messages, temperature, maxTokens, signal) {
@@ -842,9 +958,9 @@ async function testConnection() {
     }
 }
 
-async function runRefine(originalText, settings, isUser, signal) {
+async function runRefine(originalText, settings, isUser, signal, onToken = null) {
     const textToRefine = isUser ? originalText : extractTextToRefine(originalText, settings);
-    const refinedText = await callAI(buildRefineMessages(textToRefine, settings, isUser), { signal });
+    const refinedText = await callAI(buildRefineMessages(textToRefine, settings, isUser), { signal, stream: settings.streamStatusEnabled, onToken });
     const finalText = isUser ? refinedText : replaceRefinedText(originalText, refinedText, settings);
     return {
         stage: "refine",
@@ -892,9 +1008,9 @@ function replaceTaggedSegmentContent(sourceText, rule, replacement) {
     return `${before}${start}${value.startsWith("\n") ? "" : "\n"}${value}${value.endsWith("\n") ? "" : "\n"}${end}${after}`;
 }
 
-function applyFormatReplacements(sourceText, settings, replacements) {
+function applyFormatReplacements(sourceText, settings, replacements, rules = getNonBodyFormatRules(settings)) {
     let result = sourceText;
-    for (const rule of getEnabledFormatRules(settings)) {
+    for (const rule of rules) {
         const key = getRuleKey(rule);
         if (Object.prototype.hasOwnProperty.call(replacements, key)) {
             result = replaceTaggedSegmentContent(result, rule, replacements[key]);
@@ -903,9 +1019,16 @@ function applyFormatReplacements(sourceText, settings, replacements) {
     return result;
 }
 
-async function runFormat(sourceText, settings, signal, replacementOnly = true) {
+function getMissingFormatRules(sourceText, settings) {
+    return getEnabledFormatRules(settings).filter(rule => {
+        const segment = extractTaggedSegments(sourceText, [rule])[0];
+        return !segment?.found;
+    });
+}
+
+async function runFormat(sourceText, settings, signal, replacementOnly = true, onToken = null) {
     if (!replacementOnly) {
-        const formattedText = await callAI(buildFormatMessages(sourceText, settings), { signal });
+        const formattedText = await callAI(buildFormatMessages(sourceText, settings), { signal, stream: settings.streamStatusEnabled, onToken });
         return {
             stage: "format",
             original_text: sourceText,
@@ -914,9 +1037,18 @@ async function runFormat(sourceText, settings, signal, replacementOnly = true) {
         };
     }
 
-    const replacementText = await callAI(buildFormatMessages(sourceText, settings, true), { signal });
+    const rules = getNonBodyFormatRules(settings);
+    if (!rules.length) {
+        return {
+            stage: "format",
+            original_text: sourceText,
+            refined_text: "{}",
+            candidate_text: sourceText,
+        };
+    }
+    const replacementText = await callAI(buildFormatMessages(sourceText, settings, true), { signal, stream: settings.streamStatusEnabled, onToken });
     const replacements = parseFormatReplacementOutput(replacementText);
-    const formattedText = applyFormatReplacements(sourceText, settings, replacements);
+    const formattedText = applyFormatReplacements(sourceText, settings, replacements, rules);
     return {
         stage: "format",
         original_text: sourceText,
@@ -925,12 +1057,10 @@ async function runFormat(sourceText, settings, signal, replacementOnly = true) {
     };
 }
 
-async function runCompletion(sourceText, settings, messageId, signal) {
-    const continuation = await callAI(buildCompletionMessages(sourceText, settings, messageId), { signal });
+async function runCompletion(sourceText, settings, messageId, signal, onToken = null, missingRules = []) {
+    const continuation = await callAI(buildCompletionMessages(sourceText, settings, messageId, missingRules), { signal, stream: settings.streamStatusEnabled, onToken });
     const joined = sourceText + continuation;
-    const formatted = getEnabledFormatRules(settings).length
-        ? (await runFormat(joined, settings, signal, true)).candidate_text
-        : joined;
+    const formatted = joined;
     return {
         stage: "completion",
         original_text: sourceText,
@@ -949,6 +1079,57 @@ function getSelectedStages(settings, isUser) {
     if (settings.features.formatEnabled) stages.push("format");
     if (settings.features.completionEnabled) stages.push("completion");
     return stages;
+}
+
+function appendStatus(messageId, stage, text, reset = false) {
+    if (!getSettings().streamStatusEnabled) return;
+    const key = `${messageId}:${stage}`;
+    if (reset) state.statusBuffers.set(key, "");
+    const next = (state.statusBuffers.get(key) || "") + String(text || "");
+    state.statusBuffers.set(key, next);
+    const $panel = $(`#chat .mes[mesid="${messageId}"] .response-refiner-status-panel`);
+    if (!$panel.length) return;
+    $panel.find(".response-refiner-status-stage").text(stage);
+    $panel.find(".response-refiner-status-text").text(next || "等待模型返回...");
+    const node = $panel.find(".response-refiner-status-text").get(0);
+    if (node) node.scrollTop = node.scrollHeight;
+}
+
+function runStageWithStatus(messageId, stage, fn) {
+    appendStatus(messageId, stage, `开始执行：${stage}\n`, true);
+    return fn(token => appendStatus(messageId, stage, token));
+}
+
+async function runSelectedPipeline(fullOriginalText, settings, isUser, messageId, signal) {
+    let workingText = fullOriginalText;
+    const stageResults = [];
+    if (isUser) {
+        if (settings.features.refineEnabled) {
+            const result = await runStageWithStatus(messageId, "功能1 润色", onToken => runRefine(workingText, settings, true, signal, onToken));
+            stageResults.push(result);
+            workingText = result.candidate_text;
+        }
+        return { workingText, stageResults, stages: stageResults.map(item => item.stage) };
+    }
+
+    toastr.info("执行已勾选功能会按需分步处理，最多消耗三次请求。", "Response Refiner");
+    const missingRules = getMissingFormatRules(workingText, settings);
+    if (settings.features.completionEnabled && missingRules.length) {
+        const result = await runStageWithStatus(messageId, "功能3 回复补完", onToken => runCompletion(workingText, settings, messageId, signal, onToken, missingRules));
+        stageResults.push(result);
+        workingText = result.candidate_text;
+    }
+    if (settings.features.formatEnabled) {
+        const result = await runStageWithStatus(messageId, "功能2 格式检查和补全修正", onToken => runFormat(workingText, settings, signal, true, onToken));
+        stageResults.push(result);
+        workingText = result.candidate_text;
+    }
+    if (settings.features.refineEnabled) {
+        const result = await runStageWithStatus(messageId, "功能1 润色", onToken => runRefine(workingText, settings, false, signal, onToken));
+        stageResults.push(result);
+        workingText = result.candidate_text;
+    }
+    return { workingText, stageResults, stages: ["selected"] };
 }
 
 async function requestFeature(messageId, feature) {
@@ -970,6 +1151,7 @@ async function requestFeature(messageId, feature) {
     }
 
     const settings = getSettings();
+    ensureBodyRule(settings, true);
     let stages = feature === "selected" ? getSelectedStages(settings, isUser) : [feature];
     stages = stages.filter(stage => stage !== "completion" || !isUser);
     stages = stages.filter(stage => stage !== "format" || !isUser);
@@ -987,21 +1169,28 @@ async function requestFeature(messageId, feature) {
     try {
         const fullOriginalText = getMessageText(message);
         let workingText = fullOriginalText;
-        const stageResults = [];
+        let stageResults = [];
 
-        for (const stage of stages) {
-            let result;
-            if (stage === "refine") {
-                result = await runRefine(workingText, settings, isUser, controller.signal);
-            } else if (stage === "format") {
-                result = await runFormat(workingText, settings, controller.signal, true);
-            } else if (stage === "completion") {
-                result = await runCompletion(workingText, settings, resolvedId, controller.signal);
-            } else {
-                continue;
+        if (feature === "selected") {
+            const selected = await runSelectedPipeline(fullOriginalText, settings, isUser, resolvedId, controller.signal);
+            workingText = selected.workingText;
+            stageResults = selected.stageResults;
+            stages = selected.stages;
+        } else {
+            for (const stage of stages) {
+                let result;
+                if (stage === "refine") {
+                    result = await runStageWithStatus(resolvedId, "功能1 润色", onToken => runRefine(workingText, settings, isUser, controller.signal, onToken));
+                } else if (stage === "format") {
+                    result = await runStageWithStatus(resolvedId, "功能2 格式检查和补全修正", onToken => runFormat(workingText, settings, controller.signal, true, onToken));
+                } else if (stage === "completion") {
+                    result = await runStageWithStatus(resolvedId, "功能3 回复补完", onToken => runCompletion(workingText, settings, resolvedId, controller.signal, onToken, getMissingFormatRules(workingText, settings)));
+                } else {
+                    continue;
+                }
+                stageResults.push(result);
+                workingText = result.candidate_text;
             }
-            stageResults.push(result);
-            workingText = result.candidate_text;
         }
 
         const last = stageResults[stageResults.length - 1];
@@ -1118,6 +1307,9 @@ function updateMessageButtons(messageId) {
         $stopBtn.removeClass("response-refiner-run").addClass("response-refiner-stop");
         $container.append(makeActionButton(messageId, "busy", "fa-spinner fa-spin", "处理中", true));
         $container.append($stopBtn);
+        if (settings.streamStatusEnabled) {
+            renderStatusPanel($container, messageId);
+        }
     } else {
         if (settings.features.refineEnabled) {
             $container.append(makeActionButton(messageId, "refine", "fa-wand-magic-sparkles", "润色（含八股文替换/移除提示词）"));
@@ -1129,7 +1321,7 @@ function updateMessageButtons(messageId) {
             $container.append(makeActionButton(messageId, "completion", "fa-forward", "回复补完"));
         }
         if (!isUser) {
-            $container.append(makeActionButton(messageId, "selected", "fa-list-check", "执行设置中已勾选的功能"));
+            $container.append(makeActionButton(messageId, "selected", "fa-list-check", "执行设置中已勾选的功能（最多三次请求）"));
         }
     }
 
@@ -1154,6 +1346,17 @@ function updateMessageButtons(messageId) {
     if (hasCandidate && !isApplied) {
         renderInlinePreview($container, refinerData);
     }
+}
+
+function renderStatusPanel($container, messageId) {
+    const $panel = $("<div>", { class: "response-refiner-status-panel" });
+    const $header = $("<div>", { class: "response-refiner-status-header" });
+    $header.append($("<strong>", { text: "生成状态" }));
+    $header.append($("<span>", { class: "response-refiner-status-stage", text: "等待开始" }));
+    const $text = $("<div>", { class: "response-refiner-status-text", text: "等待模型返回..." });
+    $panel.append($header, $text);
+    $container.after($panel);
+    appendStatus(messageId, "等待开始", "");
 }
 
 function renderInlinePreview($container, refinerData) {
@@ -1309,20 +1512,21 @@ function formatPromptMessagesForPreview(title, messages) {
 
 function buildSelectedPromptPreview(sourceText, isUser) {
     const settings = getSettings();
-    const stages = getSelectedStages(settings, isUser);
-    if (!stages.length) return "没有已启用的可执行功能。";
-
+    const source = sourceText || "【这里是待处理文本】";
     const blocks = [];
-    let workingText = sourceText || "【这里是待处理文本】";
-    for (const stage of stages) {
-        if (stage === "refine") {
-            const textToRefine = isUser ? workingText : extractTextToRefine(workingText, settings);
-            blocks.push(formatPromptMessagesForPreview("润色", buildRefineMessages(textToRefine, settings, isUser)));
-        } else if (stage === "format" && !isUser) {
-            blocks.push(formatPromptMessagesForPreview("格式检查和补全修正（单独格式模式，AI 仅返回标签内替换 JSON）", buildFormatMessages(workingText, settings, true)));
-        } else if (stage === "completion" && !isUser) {
-            blocks.push(formatPromptMessagesForPreview("回复补完", buildCompletionMessages(workingText, settings, chat.length)));
-        }
+    const textToRefine = isUser ? source : extractTextToRefine(source, settings);
+    blocks.push(formatPromptMessagesForPreview("功能1 润色", buildRefineMessages(textToRefine, settings, isUser)));
+    if (!isUser) {
+        blocks.push(formatPromptMessagesForPreview("功能2 格式检查和补全修正（仅非正文标签，返回替换 JSON）", buildFormatMessages(source, settings, true)));
+        blocks.push(formatPromptMessagesForPreview("功能3 回复补完", buildCompletionMessages(source, settings, chat.length, getMissingFormatRules(source, settings))));
+        blocks.push([
+            "## 执行设置中已勾选的功能（三步组合管线）",
+            "脚本先解析当前回复标签状态，然后按需执行：",
+            "1. 若启用回复补完且发现缺失标签，则调用功能3补完；否则跳过补完请求。",
+            "2. 若启用格式检查，则调用功能2，只修正和补全非正文标签。",
+            "3. 若启用润色，则调用功能1，只润色润色捕获正则对应的正文标签内容。",
+            "组合执行最多会消耗三次请求，最终由脚本把每个阶段生成的标签内文本回填到原文。",
+        ].join("\n"));
     }
     return blocks.join("\n\n====================\n\n");
 }
@@ -1366,30 +1570,35 @@ function renderProviderOptions() {
 
 function renderFormatRules() {
     const settings = getSettings();
+    ensureBodyRule(settings, false);
+    const body = getBodyRuleInfo(settings, false);
     const $list = $("#response_refiner_format_rules");
     $list.empty();
 
     (settings.formatRules || []).forEach((rule, index) => {
         const ruleId = rule.id || (rule.id = crypto?.randomUUID ? crypto.randomUUID() : String(Date.now() + Math.random()));
+        const isBodyRule = body.key && getRuleKey(rule) === body.key;
         const collapsed = Boolean(settings.collapsedFormatRules?.[ruleId]);
         const $card = $("<div>", { class: `response-refiner-rule-card ${collapsed ? "collapsed" : ""}`, "data-index": index, "data-rule-id": ruleId });
         const $header = $("<div>", { class: "response-refiner-rule-header" });
         const $title = $("<div>", { class: "response-refiner-rule-title" });
         const $toggle = $("<span>", { class: "response-refiner-rule-toggle", title: "展开/关闭规则" }).append($("<i>", { class: "fa-solid fa-chevron-down response-refiner-rule-icon" }));
         const $enabled = $("<input>", { type: "checkbox", class: "response-refiner-rule-enabled", title: "启用规则" }).prop("checked", Boolean(rule.enabled));
-        const $name = $("<input>", { class: "text_pole response-refiner-rule-name", type: "text", title: "规则名" }).val(rule.name || `规则 ${index + 1}`);
+        const $name = $("<input>", { class: "text_pole response-refiner-rule-name", type: "text", title: "规则名" }).val(rule.name || `规则 ${index + 1}`).prop("disabled", isBodyRule);
         $title.append($toggle, $enabled, $name);
         const $actions = $("<div>", { class: "response-refiner-rule-actions" });
         $actions.append($("<button>", { type: "button", class: "menu_button response-refiner-rule-up", text: "上移" }));
         $actions.append($("<button>", { type: "button", class: "menu_button response-refiner-rule-down", text: "下移" }));
-        $actions.append($("<button>", { type: "button", class: "menu_button response-refiner-rule-delete", text: "删除" }));
+        if (!isBodyRule) {
+            $actions.append($("<button>", { type: "button", class: "menu_button response-refiner-rule-delete", text: "删除" }));
+        }
         $header.append($title, $actions);
 
         const $body = $("<div>", { class: "response-refiner-rule-body" }).toggle(!collapsed);
         $body.append($("<label>", { text: "开始标签" }));
-        $body.append($("<input>", { class: "text_pole response-refiner-rule-start", type: "text", placeholder: "例如: <content>" }).val(rule.startTag || ""));
+        $body.append($("<input>", { class: "text_pole response-refiner-rule-start", type: "text", placeholder: "例如: <content>" }).val(rule.startTag || "").prop("disabled", isBodyRule));
         $body.append($("<label>", { text: "结束标签" }));
-        $body.append($("<input>", { class: "text_pole response-refiner-rule-end", type: "text", placeholder: "例如: </content>" }).val(rule.endTag || ""));
+        $body.append($("<input>", { class: "text_pole response-refiner-rule-end", type: "text", placeholder: "例如: </content>" }).val(rule.endTag || "").prop("disabled", isBodyRule));
         $body.append($("<label>", { text: "标签内提示词" }));
         $body.append($("<textarea>", { class: "text_pole response-refiner-rule-prompt", rows: 3 }).val(rule.prompt || ""));
         $body.append($("<label>", { text: "标签内容模板" }));
@@ -1414,6 +1623,7 @@ function syncFormatRulesFromDom() {
             template: String($card.find(".response-refiner-rule-template").val() || ""),
         });
     });
+    ensureBodyRule(settings, false);
     saveSettings();
 }
 
@@ -1518,27 +1728,31 @@ function bindSettings() {
     });
     $("#response_refiner_filter_enabled").prop("checked", settings.filterEnabled).on("change", function () {
         settings.filterEnabled = $(this).prop("checked");
+        ensureBodyRule(settings, true);
         saveSettings();
+        renderFormatRules();
     });
     $("#response_refiner_filter_regex").val(settings.filterRegex).on("input", function () {
         settings.filterRegex = String($(this).val());
+        ensureBodyRule(settings, true);
+        saveSettings();
+        renderFormatRules();
+        updatePromptPreview();
+    });
+    $("#response_refiner_stream_status_enabled").prop("checked", settings.streamStatusEnabled).on("change", function () {
+        settings.streamStatusEnabled = $(this).prop("checked");
         saveSettings();
     });
 
-    $("#response_refiner_completion_outline_regex").val(settings.completionOutlineRegex).on("input", function () {
-        settings.completionOutlineRegex = String($(this).val());
+    $("#response_refiner_completion_chain_regex").val(settings.completionChainRegex || settings.completionOutlineRegex || "").on("input", function () {
+        settings.completionChainRegex = String($(this).val());
+        settings.completionOutlineRegex = settings.completionChainRegex;
         saveSettings();
     });
     $("#response_refiner_completion_prompt").val(settings.completionPrompt).on("input", function () {
         settings.completionPrompt = String($(this).val());
         saveSettings();
     });
-    $("#response_refiner_completion_context_messages").val(settings.completionContextMessages).on("input", function () {
-        settings.completionContextMessages = Number($(this).val());
-        saveSettings();
-        updatePromptPreview();
-    });
-
     $("#response_refiner_prompt_preview_type, #response_refiner_prompt_preview_source").on("input change", updatePromptPreview);
     $("#response_refiner_refresh_prompt_preview").on("click", updatePromptPreview);
 

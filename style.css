@@ -91,6 +91,40 @@
     color: var(--SmartThemeBodyColor);
 }
 
+.response-refiner-status-panel {
+    margin-top: 10px;
+    padding: 10px;
+    border-radius: 8px;
+    background: var(--black30a);
+    border-left: 3px solid var(--warning);
+}
+
+.response-refiner-status-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 8px;
+    color: var(--SmartThemeQuoteColor);
+}
+
+.response-refiner-status-stage {
+    font-size: 12px;
+    color: var(--grey70);
+}
+
+.response-refiner-status-text {
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 220px;
+    overflow: auto;
+    padding: 8px;
+    border-radius: 6px;
+    background: var(--black30a);
+    color: var(--SmartThemeBodyColor);
+    line-height: 1.5;
+}
+
 #response_refiner_comparison_panel {
     position: fixed;
     left: 0;
