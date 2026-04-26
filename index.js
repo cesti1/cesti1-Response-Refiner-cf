@@ -1299,15 +1299,23 @@ function refreshAllMessageButtons() {
 }
 
 async function loadSettingsHtml() {
-    if (typeof renderExtensionTemplateAsync === "function") {
-        return renderExtensionTemplateAsync(MODULE_NAME, "settings");
+    const urls = [
+        `/scripts/extensions/third-party/${MODULE_NAME}/settings.html`,
+        `/scripts/extensions/${MODULE_NAME}/settings.html`,
+    ];
+
+    for (const url of urls) {
+        try {
+            const response = await fetch(url);
+            if (response.ok) {
+                return response.text();
+            }
+        } catch (error) {
+            console.warn(`[Response Refiner] settings.html 加载失败: ${url}`, error);
+        }
     }
 
-    const response = await fetch(`/scripts/extensions/third-party/${MODULE_NAME}/settings.html`);
-    if (!response.ok) {
-        throw new Error(`无法加载 settings.html: ${response.status} ${response.statusText}`);
-    }
-    return response.text();
+    throw new Error(`无法加载 settings.html，请确认插件目录为 third-party/${MODULE_NAME}`);
 }
 
 async function addUi() {
