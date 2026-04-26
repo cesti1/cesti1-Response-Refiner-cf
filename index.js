@@ -29,6 +29,7 @@ function updateMessageBlockCompat(messageId, message) {
 const MODULE_NAME = "cesti1-Response-Refiner-cf";
 const SETTINGS_KEY = /** @type {const} */ ("response_refiner");
 const VERSION = "0.1.0-beta.1";
+const START_OF_REPLY_TAG = "[回复开头]";
 
 const DEFAULT_ENDPOINTS = {
     openrouter: "https://openrouter.ai/api/v1",
@@ -401,14 +402,33 @@ function replaceRefinedText(originalText, refinedText, settings) {
     }
 }
 
+function parseRegexInput(regexText, fallbackFlags = "g") {
+    const value = String(regexText || "").trim();
+    if (!value) return null;
+
+    const literal = value.match(/^\/(.*)\/([a-z]*)$/i);
+    if (literal) {
+        const flags = Array.from(new Set((literal[2] || fallbackFlags).split("").concat(fallbackFlags.split("")))).join("");
+        return { pattern: literal[1], flags };
+    }
+
+    return { pattern: value, flags: fallbackFlags };
+}
+
+function createConfiguredRegex(regexText, fallbackFlags = "g") {
+    const parsed = parseRegexInput(regexText, fallbackFlags);
+    if (!parsed?.pattern) return null;
+    return new RegExp(parsed.pattern, parsed.flags);
+}
+
 function extractChainContext(text, regexText) {
-    const pattern = String(regexText || "").trim();
-    if (!pattern) {
+    if (!String(regexText || "").trim()) {
         return "";
     }
 
     try {
-        const regex = new RegExp(pattern, "g");
+        const regex = createConfiguredRegex(regexText, "g");
+        if (!regex) return "";
         const matches = [];
         let match;
         while ((match = regex.exec(text)) !== null) {
@@ -478,7 +498,17 @@ function ensureBodyRule(settings, notify = false) {
     return getBodyRuleInfo(settings, notify);
 }
 
+function normalizeFormatRulesOrder(settings) {
+    const rules = Array.isArray(settings.formatRules) ? settings.formatRules : [];
+    const firstSpecialIndex = rules.findIndex(rule => isStartOfReplyRule(rule));
+    if (firstSpecialIndex < 0) return;
+
+    const [special] = rules.splice(firstSpecialIndex, 1);
+    settings.formatRules = [special, ...rules.filter(rule => !isStartOfReplyRule(rule))];
+}
+
 function getEnabledFormatRules(settings) {
+    normalizeFormatRulesOrder(settings);
     return (settings.formatRules || [])
         .filter(rule => rule && rule.enabled && rule.startTag && rule.endTag)
         .map((rule, index) => ({ ...rule, order: index + 1 }));
@@ -508,13 +538,21 @@ function escapeRegExp(value) {
     return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+function isStartOfReplyRule(rule) {
+    return String(rule?.startTag || "").trim() === START_OF_REPLY_TAG;
+}
+
 function extractTaggedSegments(text, rules) {
     const source = String(text || "");
     return rules.map(rule => {
         const start = String(rule.startTag || "");
         const end = String(rule.endTag || "");
-        if (!start || !end) {
+        if (!end || (!start && !isStartOfReplyRule(rule))) {
             return { rule, key: getRuleKey(rule), content: "", found: false };
+        }
+        if (isStartOfReplyRule(rule)) {
+            const endIndex = source.indexOf(end);
+            return { rule, key: getRuleKey(rule), content: endIndex >= 0 ? source.slice(0, endIndex) : "", found: endIndex >= 0 };
         }
         const regex = new RegExp(`${escapeRegExp(start)}([\\s\\S]*?)${escapeRegExp(end)}`, "g");
         const matches = [];
@@ -1044,8 +1082,16 @@ function replaceTaggedSegmentContent(sourceText, rule, replacement) {
     const start = String(rule.startTag || "");
     const end = String(rule.endTag || "");
     const value = String(replacement ?? "").trim();
-    if (!start || !end || !value) {
+    if (!end || !value || (!start && !isStartOfReplyRule(rule))) {
         return sourceText;
+    }
+
+    if (isStartOfReplyRule(rule)) {
+        const endIndex = sourceText.indexOf(end);
+        if (endIndex < 0) {
+            return `${value}${value.endsWith("\n") ? "" : "\n"}${end}\n${sourceText}`;
+        }
+        return `${value}${value.endsWith("\n") ? "" : "\n"}${sourceText.slice(endIndex)}`;
     }
 
     const regex = new RegExp(`${escapeRegExp(start)}([\\s\\S]*?)${escapeRegExp(end)}`, "g");
@@ -1568,7 +1614,23 @@ function extractTagPairsFromSample(text) {
         const tag = match[1];
         if (seen.has(tag)) continue;
         seen.add(tag);
-        pairs.push({ tag, startTag: `<${tag}>`, endTag: `</${tag}>`, content: match[2] || "" });
+        pairs.push({ tag, startTag: `<${tag}>`, endTag: `</${tag}>`, content: match[2] || "", special: false });
+    }
+
+    const firstClosing = source.match(/<\/([a-zA-Z][\w:-]*)>/);
+    if (firstClosing) {
+        const beforeClosing = source.slice(0, firstClosing.index);
+        const startTag = `<${firstClosing[1]}>`;
+        const hasOpeningBeforeClosing = source.slice(0, firstClosing.index).includes(startTag);
+        if (beforeClosing.trim() && !hasOpeningBeforeClosing) {
+            pairs.unshift({
+                tag: firstClosing[1],
+                startTag: START_OF_REPLY_TAG,
+                endTag: firstClosing[0],
+                content: beforeClosing,
+                special: true,
+            });
+        }
     }
     return pairs;
 }
@@ -1579,6 +1641,7 @@ function buildExtractRulesMessages(sampleText, pairs) {
         { role: "user", content: [
             "请根据完整回复样例和已提取的标签，为每个标签生成格式检查规则建议。",
             "输出 JSON 数组，每项包含 name、startTag、endTag、prompt、template。",
+            `如果 startTag 是 ${START_OF_REPLY_TAG}，必须原样保留，表示从回复开头到 endTag 之前的特殊块；这种规则只能有一个，且应排在规则列表顶部。`,
             "prompt 要描述该标签内部内容应该满足的规则；template 要包含开始标签、占位内容和结束标签。",
             "已提取标签：",
             JSON.stringify(pairs, null, 2),
@@ -1593,7 +1656,7 @@ function normalizeExtractedRules(text) {
     const match = cleaned.match(/\[[\s\S]*\]/);
     const parsed = JSON.parse(match ? match[0] : cleaned);
     if (!Array.isArray(parsed)) throw new Error("AI 未返回规则数组");
-    return parsed.map(item => ({
+    const rules = parsed.map(item => ({
         id: crypto?.randomUUID ? crypto.randomUUID() : String(Date.now() + Math.random()),
         enabled: true,
         name: String(item.name || "自动提取规则"),
@@ -1602,6 +1665,9 @@ function normalizeExtractedRules(text) {
         prompt: String(item.prompt || ""),
         template: String(item.template || `${item.startTag || ""}\n\n${item.endTag || ""}`),
     })).filter(rule => rule.startTag && rule.endTag);
+
+    const firstSpecial = rules.find(rule => isStartOfReplyRule(rule));
+    return firstSpecial ? [firstSpecial, ...rules.filter(rule => !isStartOfReplyRule(rule))] : rules;
 }
 
 async function runExtractRules() {
@@ -1631,7 +1697,15 @@ function applyExtractedRules() {
     if (!state.extractedRules.length) return;
     const settings = getSettings();
     syncFormatRulesFromDom();
-    settings.formatRules.push(...state.extractedRules);
+    const incomingSpecial = state.extractedRules.find(rule => isStartOfReplyRule(rule));
+    if (incomingSpecial) {
+        settings.formatRules = settings.formatRules.filter(rule => !isStartOfReplyRule(rule));
+        settings.formatRules.unshift(incomingSpecial);
+        settings.formatRules.push(...state.extractedRules.filter(rule => !isStartOfReplyRule(rule)));
+    } else {
+        settings.formatRules.push(...state.extractedRules);
+    }
+    normalizeFormatRulesOrder(settings);
     state.extractedRules = [];
     saveSettings();
     renderFormatRules();
@@ -1713,6 +1787,7 @@ function renderProviderOptions() {
 function renderFormatRules() {
     const settings = getSettings();
     ensureBodyRule(settings, false);
+    normalizeFormatRulesOrder(settings);
     const body = getBodyRuleInfo(settings, false);
     const $list = $("#response_refiner_format_rules");
     $list.empty();
@@ -1726,11 +1801,12 @@ function renderFormatRules() {
         const $title = $("<div>", { class: "response-refiner-rule-title" });
         const $toggle = $("<span>", { class: "response-refiner-rule-toggle", title: "展开/关闭规则" }).append($("<i>", { class: "fa-solid fa-chevron-down response-refiner-rule-icon" }));
         const $enabled = $("<input>", { type: "checkbox", class: "response-refiner-rule-enabled", title: "启用规则" }).prop("checked", Boolean(rule.enabled));
+        const isStartRule = isStartOfReplyRule(rule);
         const $name = $("<input>", { class: "text_pole response-refiner-rule-name", type: "text", title: "规则名" }).val(rule.name || `规则 ${index + 1}`).prop("disabled", isBodyRule);
         $title.append($toggle, $enabled, $name);
         const $actions = $("<div>", { class: "response-refiner-rule-actions" });
-        $actions.append($("<button>", { type: "button", class: "menu_button response-refiner-rule-up", text: "上移" }));
-        $actions.append($("<button>", { type: "button", class: "menu_button response-refiner-rule-down", text: "下移" }));
+        $actions.append($("<button>", { type: "button", class: "menu_button response-refiner-rule-up", text: "上移" }).prop("disabled", isStartRule));
+        $actions.append($("<button>", { type: "button", class: "menu_button response-refiner-rule-down", text: "下移" }).prop("disabled", isStartRule));
         if (!isBodyRule) {
             $actions.append($("<button>", { type: "button", class: "menu_button response-refiner-rule-delete", text: "删除" }));
         }
@@ -1738,7 +1814,7 @@ function renderFormatRules() {
 
         const $body = $("<div>", { class: "response-refiner-rule-body" }).toggle(!collapsed);
         $body.append($("<label>", { text: "开始标签" }));
-        $body.append($("<input>", { class: "text_pole response-refiner-rule-start", type: "text", placeholder: "例如: <content>" }).val(rule.startTag || "").prop("disabled", isBodyRule));
+        $body.append($("<input>", { class: "text_pole response-refiner-rule-start", type: "text", placeholder: "例如: <content>" }).val(rule.startTag || "").prop("disabled", isBodyRule || isStartRule));
         $body.append($("<label>", { text: "结束标签" }));
         $body.append($("<input>", { class: "text_pole response-refiner-rule-end", type: "text", placeholder: "例如: </content>" }).val(rule.endTag || "").prop("disabled", isBodyRule));
         $body.append($("<label>", { text: "标签内提示词" }));
@@ -1766,6 +1842,7 @@ function syncFormatRulesFromDom() {
         });
     });
     ensureBodyRule(settings, false);
+    normalizeFormatRulesOrder(settings);
     saveSettings();
 }
 
