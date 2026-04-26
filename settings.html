@@ -125,6 +125,11 @@
         <label for="response_refiner_extract_chain_regex">思维链捕获正则（可选）</label>
         <input id="response_refiner_extract_chain_regex" class="text_pole marginBot8" type="text" placeholder="例如: /([\s\S]*)<\/think>/g 或 <think>([\s\S]*?)<\/think>" />
         <div class="response-refiner-note marginBot8">留空时不会生成思维链规则，避免误把正文开头内容捕获为思维链。</div>
+        <label for="response_refiner_extract_rules_prompt">普通标签规则生成提示词</label>
+        <textarea id="response_refiner_extract_rules_prompt" class="text_pole marginBot8" rows="5" placeholder="用于生成普通标签规则的提示词"></textarea>
+        <label for="response_refiner_extract_chain_rule_prompt">思维链规则生成提示词</label>
+        <textarea id="response_refiner_extract_chain_rule_prompt" class="text_pole marginBot8" rows="5" placeholder="用于生成思维链标签内提示词的模板，可使用 {{startTag}}、{{endTag}}、{{tag}}"></textarea>
+        <div class="response-refiner-note marginBot8">思维链规则提示词支持占位符：{{startTag}}、{{endTag}}、{{tag}}。修改后会自动保存，并用于后续自动提取。</div>
         <div class="response-refiner-button-row marginBot8">
             <button id="response_refiner_extract_run" type="button" class="menu_button response-refiner-menu-button"><i class="fa-solid fa-wand-magic-sparkles"></i><span>提取并生成规则</span></button>
             <button id="response_refiner_extract_apply" type="button" class="menu_button response-refiner-menu-button" disabled><i class="fa-solid fa-check"></i><span>追加到规则列表</span></button>

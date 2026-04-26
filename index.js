@@ -32,6 +32,19 @@ const VERSION = "0.1.0-beta.1";
 const START_OF_TEXT_TAG = "__RESPONSE_REFINER_START_OF_TEXT__";
 const START_OF_TEXT_LABEL = "文本开头";
 
+const DEFAULT_EXTRACT_RULES_PROMPT = [
+    "请根据完整回复样例和已提取的标签，为每个标签生成格式检查规则建议。",
+    "输出 JSON 数组，每项包含 name、startTag、endTag、prompt、template；如果输入项带 startAnchored:true，必须原样保留 startTag、startAnchored 和 forceTop。",
+    "prompt 要描述该标签内部内容应该满足的规则；template 要包含开始标签、占位内容和结束标签；若 startAnchored:true，则 template 从占位内容开始并以结束标签结束，不要编造开始标签。",
+].join("\n");
+
+const DEFAULT_EXTRACT_CHAIN_RULE_PROMPT = [
+    "这是思维链或推理结构标签规则。请根据样例中 {{startTag}} 到 {{endTag}} 的内容生成标签内提示词。",
+    "提示词必须要求保留思维链的结构层级、内部标签块、编号/步骤顺序、段落边界和闭合关系。",
+    "如果思维链内部包含其他 XML/HTML 风格标签，必须把它们视为思维链结构的一部分，不要改写成正文，也不要移动到正文标签内。",
+    "生成或修正时应保持推理过程完整、连贯、顺序稳定，并确保最终以 {{endTag}} 正确闭合。",
+].join("\n");
+
 const DEFAULT_ENDPOINTS = {
     openrouter: "https://openrouter.ai/api/v1",
     gemini: "https://generativelanguage.googleapis.com/v1beta",
@@ -149,6 +162,8 @@ const DEFAULT_SETTINGS = {
     completionChainRegex: "",
     completionOutlineRegex: "",
     completionPrompt: "如果当前 AI 回复被截断，请根据格式规则、可用思维链或需要补完回复的上一条用户消息继续补完。只输出续写或缺失标签内容，不要解释。",
+    extractRulesPrompt: DEFAULT_EXTRACT_RULES_PROMPT,
+    extractChainRulePrompt: DEFAULT_EXTRACT_CHAIN_RULE_PROMPT,
     completionContextMessages: 0,
     streamStatusEnabled: false,
     uiCollapsedSections: {},
@@ -325,6 +340,16 @@ function getLatestUserMessage(beforeMessageId = chat.length) {
         }
     }
     return { message: null, messageId: -1 };
+}
+
+function getLatestAssistantMessageText() {
+    for (let i = chat.length - 1; i >= 0; i--) {
+        const message = /** @type {RefinerChatMessage | undefined} */ (chat[i]);
+        if (isAssistantMessage(message)) {
+            return getMessageText(message);
+        }
+    }
+    return "";
 }
 
 function getRecentContext(messageId, limit) {
@@ -1598,16 +1623,10 @@ function updateMessageButtons(messageId) {
             renderStatusPanel($container, messageId);
         }
     } else {
-        if (settings.features.refineEnabled) {
-            $container.append(makeActionButton(messageId, "refine", "fa-wand-magic-sparkles", "润色（含八股文替换/移除提示词）"));
-        }
-        if (!isUser && settings.features.formatEnabled) {
-            $container.append(makeActionButton(messageId, "format", "fa-code", "格式检查和补全修正"));
-        }
-        if (!isUser && settings.features.completionEnabled) {
-            $container.append(makeActionButton(messageId, "completion", "fa-forward", "回复补完"));
-        }
+        $container.append(makeActionButton(messageId, "refine", "fa-wand-magic-sparkles", "润色（含八股文替换/移除提示词）"));
         if (!isUser) {
+            $container.append(makeActionButton(messageId, "format", "fa-code", "格式检查和补全修正"));
+            $container.append(makeActionButton(messageId, "completion", "fa-forward", "回复补完"));
             $container.append(makeActionButton(messageId, "selected", "fa-list-check", "执行设置中已勾选的功能（最多三次请求）"));
         }
     }
@@ -1732,12 +1751,12 @@ function extractTagPairsFromSample(text) {
 }
 
 function buildExtractRulesMessages(sampleText, pairs) {
+    const settings = getSettings();
+    const prompt = String(settings.extractRulesPrompt || DEFAULT_EXTRACT_RULES_PROMPT).trim() || DEFAULT_EXTRACT_RULES_PROMPT;
     return [
         { role: "system", content: "你是格式规则提取助手。你只输出 JSON 数组，不输出解释、Markdown 或额外文本。" },
         { role: "user", content: [
-            "请根据完整回复样例和已提取的标签，为每个标签生成格式检查规则建议。",
-            "输出 JSON 数组，每项包含 name、startTag、endTag、prompt、template；如果输入项带 startAnchored:true，必须原样保留 startTag、startAnchored 和 forceTop。",
-            "prompt 要描述该标签内部内容应该满足的规则；template 要包含开始标签、占位内容和结束标签；若 startAnchored:true，则 template 从占位内容开始并以结束标签结束，不要编造开始标签。",
+            prompt,
             "已提取标签：",
             JSON.stringify(pairs, null, 2),
             "完整回复样例：",
@@ -1773,10 +1792,17 @@ function extractChainPairFromSample(text, regexText) {
 }
 
 function createAnchoredRuleFromPair(pair) {
+    const settings = getSettings();
     const endTag = String(pair.endTag || "");
     const realStartTag = String(pair.realStartTag || pair.startTag || START_OF_TEXT_TAG);
     const tag = String(pair.tag || endTag.replace(/^<\//, "").replace(/>$/, "") || "特殊块");
     const startOnly = !realStartTag || realStartTag === START_OF_TEXT_TAG;
+    const startLabel = startOnly ? START_OF_TEXT_LABEL : realStartTag;
+    const promptTemplate = String(settings.extractChainRulePrompt || DEFAULT_EXTRACT_CHAIN_RULE_PROMPT).trim() || DEFAULT_EXTRACT_CHAIN_RULE_PROMPT;
+    const prompt = promptTemplate
+        .replace(/\{\{startTag\}\}/g, startLabel)
+        .replace(/\{\{endTag\}\}/g, endTag)
+        .replace(/\{\{tag\}\}/g, tag);
     return {
         id: makeRuleId(),
         enabled: true,
@@ -1784,9 +1810,7 @@ function createAnchoredRuleFromPair(pair) {
         startTag: startOnly ? START_OF_TEXT_TAG : realStartTag,
         realStartTag: startOnly ? START_OF_TEXT_TAG : realStartTag,
         endTag,
-        prompt: startOnly
-            ? `这是从回复文本起点开始、到 ${endTag} 结束的思维链特殊块；需要保持内容完整、连贯，并保留结束标签。`
-            : `这是 ${realStartTag} 到 ${endTag} 内部的思维链块；需要保持内容完整、连贯，并保留成对标签。`,
+        prompt,
         template: startOnly ? `这里填写${tag}内容\n${endTag}` : `${realStartTag}\n这里填写${tag}内容\n${endTag}`,
         startAnchored: startOnly,
         forceTop: startOnly,
@@ -1822,7 +1846,23 @@ function normalizeExtractedRules(text, fixedRules = []) {
     ].sort((a, b) => Number(Boolean(b.forceTop || isStartAnchoredRule(b))) - Number(Boolean(a.forceTop || isStartAnchoredRule(a))));
 }
 
+function syncExtractPromptSettingsFromDom() {
+    const settings = getSettings();
+    const rulesPrompt = String($("#response_refiner_extract_rules_prompt").val() || "");
+    const chainRulePrompt = String($("#response_refiner_extract_chain_rule_prompt").val() || "");
+    settings.extractRulesPrompt = rulesPrompt || DEFAULT_EXTRACT_RULES_PROMPT;
+    settings.extractChainRulePrompt = chainRulePrompt || DEFAULT_EXTRACT_CHAIN_RULE_PROMPT;
+    saveSettings();
+}
+
+function populateExtractPromptInputs() {
+    const settings = getSettings();
+    $("#response_refiner_extract_rules_prompt").val(settings.extractRulesPrompt || DEFAULT_EXTRACT_RULES_PROMPT);
+    $("#response_refiner_extract_chain_rule_prompt").val(settings.extractChainRulePrompt || DEFAULT_EXTRACT_CHAIN_RULE_PROMPT);
+}
+
 async function runExtractRules() {
+    syncExtractPromptSettingsFromDom();
     const sample = String($("#response_refiner_extract_source").val() || "");
     const chainRegex = String($("#response_refiner_extract_chain_regex").val() || "").trim();
     const normalPairs = extractTagPairsFromSample(sample);
@@ -1909,9 +1949,21 @@ function buildPromptPreviewBlocks(sourceText, isUser) {
     };
 }
 
+function fillPromptPreviewSourceFromLatestAssistant(force = false) {
+    const $source = $("#response_refiner_prompt_preview_source");
+    const current = String($source.val() || "");
+    if (!force && current.trim()) return current;
+    const latest = getLatestAssistantMessageText();
+    if (latest) {
+        $source.val(latest);
+        return latest;
+    }
+    return current;
+}
+
 function updatePromptPreview() {
     const isUser = String($("#response_refiner_prompt_preview_type").val() || "assistant") === "user";
-    const source = String($("#response_refiner_prompt_preview_source").val() || "");
+    const source = String(fillPromptPreviewSourceFromLatestAssistant(false) || "");
     const selected = String($("#response_refiner_prompt_preview_part").val() || "refine");
     const settings = getSettings();
     const chainRegex = String(settings.completionChainRegex || settings.completionOutlineRegex || "");
@@ -2147,16 +2199,25 @@ function bindSettings() {
         settings.completionChainRegex = String($(this).val());
         settings.completionOutlineRegex = settings.completionChainRegex;
         saveSettings();
+        updatePromptPreview();
     });
     $("#response_refiner_completion_prompt").val(settings.completionPrompt).on("input", function () {
         settings.completionPrompt = String($(this).val());
         saveSettings();
+        updatePromptPreview();
     });
     $("#response_refiner_prompt_preview_type, #response_refiner_prompt_preview_part, #response_refiner_prompt_preview_source").on("input change", updatePromptPreview);
-    $("#response_refiner_refresh_prompt_preview").on("click", updatePromptPreview);
+    $("#response_refiner_refresh_prompt_preview").on("click", function () {
+        fillPromptPreviewSourceFromLatestAssistant(true);
+        updatePromptPreview();
+    });
+
+    populateExtractPromptInputs();
+    $("#response_refiner_extract_rules_prompt, #response_refiner_extract_chain_rule_prompt").on("input", syncExtractPromptSettingsFromDom);
 
     $("#response_refiner_open_extract_rules").on("click", function () {
         state.extractedRules = [];
+        populateExtractPromptInputs();
         $("#response_refiner_extract_output").text("暂无提取结果");
         $("#response_refiner_extract_apply").prop("disabled", true);
         $("#response_refiner_extract_modal").show();
