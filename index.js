@@ -403,15 +403,37 @@ function replaceRefinedText(originalText, refinedText, settings) {
     }
 }
 
+function normalizeRegexFlags(flags, defaultFlags = "g") {
+    const seen = new Set();
+    return String(flags || defaultFlags || "")
+        .split("")
+        .concat(String(defaultFlags || "").split(""))
+        .filter(flag => /[dgimsuvy]/.test(flag) && !seen.has(flag) && seen.add(flag))
+        .join("");
+}
+
 function parseUserRegex(regexText, defaultFlags = "g") {
     const raw = String(regexText || "").trim();
     if (!raw) return null;
     const literal = raw.match(/^\/(.*)\/([a-z]*)$/i);
     if (literal) {
-        const flags = literal[2].includes("g") ? literal[2] : `${literal[2]}g`;
-        return new RegExp(literal[1], flags);
+        return new RegExp(literal[1], normalizeRegexFlags(literal[2], defaultFlags));
     }
-    return new RegExp(raw, defaultFlags);
+    return new RegExp(raw, normalizeRegexFlags(defaultFlags, defaultFlags));
+}
+
+function isOnlyXmlLikeTag(value) {
+    return /^<\/?[a-zA-Z][\w:-]*\b[^>]*>$/.test(String(value || "").trim());
+}
+
+function getPreferredRegexCapture(match) {
+    if (!match) return "";
+    const captures = match.slice(1).filter(value => value !== undefined && String(value).trim());
+    const contentCapture = captures.find(value => !isOnlyXmlLikeTag(value));
+    if (contentCapture !== undefined) {
+        return contentCapture;
+    }
+    return captures.length ? captures[0] : match[0];
 }
 
 function extractChainContext(text, regexText) {
@@ -422,10 +444,14 @@ function extractChainContext(text, regexText) {
 
     try {
         const regex = parseUserRegex(pattern, "g");
+        if (!regex) return "";
         const matches = [];
         let match;
         while ((match = regex.exec(text)) !== null) {
-            matches.push(match[1] !== undefined ? match[1] : match[0]);
+            const captured = getPreferredRegexCapture(match);
+            if (String(captured || "").trim()) {
+                matches.push(captured);
+            }
             if (match[0] === "") {
                 regex.lastIndex++;
             }
@@ -1635,10 +1661,10 @@ function extractTagPairsFromSample(text) {
     const seen = new Set();
     const firstEnd = source.match(/<\/([a-zA-Z][\w:-]*)>/);
     const firstStart = source.match(/<([a-zA-Z][\w:-]*)\b[^>]*>/);
-    if (firstEnd && (!firstStart || firstEnd.index < firstStart.index)) {
+    if (firstEnd && (!firstStart || firstEnd.index <= firstStart.index) && firstEnd.index > 0) {
         const tag = firstEnd[1];
         const endTag = `</${tag}>`;
-        seen.add(`start:${tag}`);
+        seen.add(`anchored:${tag}`);
         pairs.push({
             tag,
             startTag: START_OF_TEXT_TAG,
@@ -1653,8 +1679,8 @@ function extractTagPairsFromSample(text) {
     let match;
     while ((match = tagRegex.exec(source)) !== null) {
         const tag = match[1];
-        if (seen.has(tag)) continue;
-        seen.add(tag);
+        if (seen.has(`paired:${tag}`)) continue;
+        seen.add(`paired:${tag}`);
         pairs.push({ tag, startTag: `<${tag}>`, endTag: `</${tag}>`, content: match[2] || "" });
     }
     return pairs;
