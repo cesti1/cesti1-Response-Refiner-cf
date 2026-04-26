@@ -29,7 +29,8 @@ function updateMessageBlockCompat(messageId, message) {
 const MODULE_NAME = "cesti1-Response-Refiner-cf";
 const SETTINGS_KEY = /** @type {const} */ ("response_refiner");
 const VERSION = "0.1.0-beta.1";
-const START_OF_REPLY_TAG = "[回复开头]";
+const START_OF_TEXT_TAG = "__RESPONSE_REFINER_START_OF_TEXT__";
+const START_OF_TEXT_LABEL = "文本开头";
 
 const DEFAULT_ENDPOINTS = {
     openrouter: "https://openrouter.ai/api/v1",
@@ -402,33 +403,25 @@ function replaceRefinedText(originalText, refinedText, settings) {
     }
 }
 
-function parseRegexInput(regexText, fallbackFlags = "g") {
-    const value = String(regexText || "").trim();
-    if (!value) return null;
-
-    const literal = value.match(/^\/(.*)\/([a-z]*)$/i);
+function parseUserRegex(regexText, defaultFlags = "g") {
+    const raw = String(regexText || "").trim();
+    if (!raw) return null;
+    const literal = raw.match(/^\/(.*)\/([a-z]*)$/i);
     if (literal) {
-        const flags = Array.from(new Set((literal[2] || fallbackFlags).split("").concat(fallbackFlags.split("")))).join("");
-        return { pattern: literal[1], flags };
+        const flags = literal[2].includes("g") ? literal[2] : `${literal[2]}g`;
+        return new RegExp(literal[1], flags);
     }
-
-    return { pattern: value, flags: fallbackFlags };
-}
-
-function createConfiguredRegex(regexText, fallbackFlags = "g") {
-    const parsed = parseRegexInput(regexText, fallbackFlags);
-    if (!parsed?.pattern) return null;
-    return new RegExp(parsed.pattern, parsed.flags);
+    return new RegExp(raw, defaultFlags);
 }
 
 function extractChainContext(text, regexText) {
-    if (!String(regexText || "").trim()) {
+    const pattern = String(regexText || "").trim();
+    if (!pattern) {
         return "";
     }
 
     try {
-        const regex = createConfiguredRegex(regexText, "g");
-        if (!regex) return "";
+        const regex = parseUserRegex(pattern, "g");
         const matches = [];
         let match;
         while ((match = regex.exec(text)) !== null) {
@@ -498,19 +491,17 @@ function ensureBodyRule(settings, notify = false) {
     return getBodyRuleInfo(settings, notify);
 }
 
-function normalizeFormatRulesOrder(settings) {
-    const rules = Array.isArray(settings.formatRules) ? settings.formatRules : [];
-    const firstSpecialIndex = rules.findIndex(rule => isStartOfReplyRule(rule));
-    if (firstSpecialIndex < 0) return;
+function isStartAnchoredRule(rule) {
+    return String(rule?.startTag || "") === START_OF_TEXT_TAG || Boolean(rule?.startAnchored);
+}
 
-    const [special] = rules.splice(firstSpecialIndex, 1);
-    settings.formatRules = [special, ...rules.filter(rule => !isStartOfReplyRule(rule))];
+function getRuleStartLabel(rule) {
+    return isStartAnchoredRule(rule) ? START_OF_TEXT_LABEL : String(rule?.startTag || "");
 }
 
 function getEnabledFormatRules(settings) {
-    normalizeFormatRulesOrder(settings);
     return (settings.formatRules || [])
-        .filter(rule => rule && rule.enabled && rule.startTag && rule.endTag)
+        .filter(rule => rule && rule.enabled && (rule.startTag || isStartAnchoredRule(rule)) && rule.endTag)
         .map((rule, index) => ({ ...rule, order: index + 1 }));
 }
 
@@ -523,7 +514,7 @@ function buildFormatRulesText(settings) {
     return rules.map(rule => [
         `${rule.order}. ${rule.name || "未命名标签"}`,
         `规则ID：${getRuleKey(rule)}`,
-        `开始标签：${rule.startTag}`,
+        `开始标签：${getRuleStartLabel(rule)}`,
         `结束标签：${rule.endTag}`,
         `标签内提示词：${rule.prompt || "无"}`,
         `标签内容模板：\n${rule.template || `${rule.startTag}\n\n${rule.endTag}`}`,
@@ -531,15 +522,11 @@ function buildFormatRulesText(settings) {
 }
 
 function getRuleKey(rule) {
-    return String(rule.id || rule.name || rule.startTag || "rule").replace(/[^a-zA-Z0-9_\-\u4e00-\u9fa5]/g, "_");
+    return String(rule.id || rule.name || rule.endTag || rule.startTag || "rule").replace(/[^a-zA-Z0-9_\-\u4e00-\u9fa5]/g, "_");
 }
 
 function escapeRegExp(value) {
     return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function isStartOfReplyRule(rule) {
-    return String(rule?.startTag || "").trim() === START_OF_REPLY_TAG;
 }
 
 function extractTaggedSegments(text, rules) {
@@ -547,14 +534,12 @@ function extractTaggedSegments(text, rules) {
     return rules.map(rule => {
         const start = String(rule.startTag || "");
         const end = String(rule.endTag || "");
-        if (!end || (!start && !isStartOfReplyRule(rule))) {
+        if (!end || (!start && !isStartAnchoredRule(rule))) {
             return { rule, key: getRuleKey(rule), content: "", found: false };
         }
-        if (isStartOfReplyRule(rule)) {
-            const endIndex = source.indexOf(end);
-            return { rule, key: getRuleKey(rule), content: endIndex >= 0 ? source.slice(0, endIndex) : "", found: endIndex >= 0 };
-        }
-        const regex = new RegExp(`${escapeRegExp(start)}([\\s\\S]*?)${escapeRegExp(end)}`, "g");
+        const regex = isStartAnchoredRule(rule)
+            ? new RegExp(`^([\\s\\S]*?)${escapeRegExp(end)}`)
+            : new RegExp(`${escapeRegExp(start)}([\\s\\S]*?)${escapeRegExp(end)}`, "g");
         const matches = [];
         let match;
         while ((match = regex.exec(source)) !== null) {
@@ -575,7 +560,7 @@ function buildFormatRulesTextForRules(rules) {
     return rules.map((rule, index) => [
         `${index + 1}. ${rule.name || "未命名标签"}`,
         `规则ID：${getRuleKey(rule)}`,
-        `开始标签：${rule.startTag}`,
+        `开始标签：${getRuleStartLabel(rule)}`,
         `结束标签：${rule.endTag}`,
         `标签内提示词：${rule.prompt || "无"}`,
         `标签内容模板：\n${rule.template || `${rule.startTag}\n\n${rule.endTag}`}`,
@@ -592,6 +577,7 @@ function buildFormatReplacementPromptText(sourceText, settings) {
         "为了减少输出 token，你绝对不要输出完整回复、开始标签、结束标签、解释或 Markdown 代码块。",
         "你必须只输出一个 JSON 对象，键为规则ID，值为该规则标签内修正后的纯文本。",
         "如果某个非正文标签不存在但规则要求补全，请仍在对应规则ID里输出应插入的标签内文本。",
+        "脚本会按照格式标签规则顺序重排标签块；若开始标签为“文本开头”，该块必须位于回复最开头。",
         "格式标签规则：",
         buildFormatRulesTextForRules(rules),
         "当前标签内内容：",
@@ -643,7 +629,7 @@ function findLastUnclosedTag(sourceText, rules) {
     for (const rule of rules) {
         const start = String(rule.startTag || "");
         const end = String(rule.endTag || "");
-        if (!start || !end) continue;
+        if (!end || isStartAnchoredRule(rule) || !start) continue;
         const regex = new RegExp(`${escapeRegExp(start)}|${escapeRegExp(end)}`, "g");
         let match;
         while ((match = regex.exec(source)) !== null) {
@@ -1082,16 +1068,17 @@ function replaceTaggedSegmentContent(sourceText, rule, replacement) {
     const start = String(rule.startTag || "");
     const end = String(rule.endTag || "");
     const value = String(replacement ?? "").trim();
-    if (!end || !value || (!start && !isStartOfReplyRule(rule))) {
+    if (!end || !value || (!start && !isStartAnchoredRule(rule))) {
         return sourceText;
     }
 
-    if (isStartOfReplyRule(rule)) {
-        const endIndex = sourceText.indexOf(end);
-        if (endIndex < 0) {
-            return `${value}${value.endsWith("\n") ? "" : "\n"}${end}\n${sourceText}`;
+    if (isStartAnchoredRule(rule)) {
+        const block = `${value}${value.endsWith("\n") ? "" : "\n"}${end}`;
+        const regex = new RegExp(`^([\\s\\S]*?)${escapeRegExp(end)}`);
+        if (regex.test(sourceText)) {
+            return sourceText.replace(regex, block);
         }
-        return `${value}${value.endsWith("\n") ? "" : "\n"}${sourceText.slice(endIndex)}`;
+        return `${block}${sourceText.startsWith("\n") ? "" : "\n"}${sourceText}`;
     }
 
     const regex = new RegExp(`${escapeRegExp(start)}([\\s\\S]*?)${escapeRegExp(end)}`, "g");
@@ -1111,6 +1098,44 @@ function replaceTaggedSegmentContent(sourceText, rule, replacement) {
     return `${before}${start}${value.startsWith("\n") ? "" : "\n"}${value}${value.endsWith("\n") ? "" : "\n"}${end}${after}`;
 }
 
+function getRuleFullBlock(text, rule) {
+    const source = String(text || "");
+    const start = String(rule.startTag || "");
+    const end = String(rule.endTag || "");
+    if (!end || (!start && !isStartAnchoredRule(rule))) return "";
+    if (isStartAnchoredRule(rule)) {
+        const match = source.match(new RegExp(`^([\\s\\S]*?${escapeRegExp(end)})`));
+        return match ? match[1] : "";
+    }
+    const regex = new RegExp(`${escapeRegExp(start)}[\\s\\S]*?${escapeRegExp(end)}`, "g");
+    const matches = source.match(regex);
+    return matches?.length ? matches[matches.length - 1] : "";
+}
+
+function removeRuleBlocks(text, rules) {
+    let result = String(text || "");
+    for (const rule of rules) {
+        const start = String(rule.startTag || "");
+        const end = String(rule.endTag || "");
+        if (!end || (!start && !isStartAnchoredRule(rule))) continue;
+        const regex = isStartAnchoredRule(rule)
+            ? new RegExp(`^([\\s\\S]*?${escapeRegExp(end)})(?:\\s*)`)
+            : new RegExp(`${escapeRegExp(start)}[\\s\\S]*?${escapeRegExp(end)}\\s*`, "g");
+        result = result.replace(regex, "");
+    }
+    return result.trim();
+}
+
+function reorderFormatBlocks(sourceText, rules) {
+    const orderedBlocks = [];
+    for (const rule of rules) {
+        const block = getRuleFullBlock(sourceText, rule);
+        if (block) orderedBlocks.push(block.trim());
+    }
+    const remainder = removeRuleBlocks(sourceText, rules);
+    return [...orderedBlocks, remainder].filter(Boolean).join("\n");
+}
+
 function applyFormatReplacements(sourceText, settings, replacements, rules = getNonBodyFormatRules(settings)) {
     let result = sourceText;
     for (const rule of rules) {
@@ -1119,7 +1144,7 @@ function applyFormatReplacements(sourceText, settings, replacements, rules = get
             result = replaceTaggedSegmentContent(result, rule, replacements[key]);
         }
     }
-    return result;
+    return reorderFormatBlocks(result, getEnabledFormatRules(settings));
 }
 
 function getMissingFormatRules(sourceText, settings) {
@@ -1606,31 +1631,31 @@ function toggleComparisonPanel() {
 
 function extractTagPairsFromSample(text) {
     const source = String(text || "");
-    const tagRegex = /<([a-zA-Z][\w:-]*)\b[^>]*>([\s\S]*?)<\/\1>/g;
     const pairs = [];
     const seen = new Set();
+    const firstEnd = source.match(/<\/([a-zA-Z][\w:-]*)>/);
+    const firstStart = source.match(/<([a-zA-Z][\w:-]*)\b[^>]*>/);
+    if (firstEnd && (!firstStart || firstEnd.index < firstStart.index)) {
+        const tag = firstEnd[1];
+        const endTag = `</${tag}>`;
+        seen.add(`start:${tag}`);
+        pairs.push({
+            tag,
+            startTag: START_OF_TEXT_TAG,
+            endTag,
+            content: source.slice(0, firstEnd.index),
+            startAnchored: true,
+            forceTop: true,
+        });
+    }
+
+    const tagRegex = /<([a-zA-Z][\w:-]*)\b[^>]*>([\s\S]*?)<\/\1>/g;
     let match;
     while ((match = tagRegex.exec(source)) !== null) {
         const tag = match[1];
         if (seen.has(tag)) continue;
         seen.add(tag);
-        pairs.push({ tag, startTag: `<${tag}>`, endTag: `</${tag}>`, content: match[2] || "", special: false });
-    }
-
-    const firstClosing = source.match(/<\/([a-zA-Z][\w:-]*)>/);
-    if (firstClosing) {
-        const beforeClosing = source.slice(0, firstClosing.index);
-        const startTag = `<${firstClosing[1]}>`;
-        const hasOpeningBeforeClosing = source.slice(0, firstClosing.index).includes(startTag);
-        if (beforeClosing.trim() && !hasOpeningBeforeClosing) {
-            pairs.unshift({
-                tag: firstClosing[1],
-                startTag: START_OF_REPLY_TAG,
-                endTag: firstClosing[0],
-                content: beforeClosing,
-                special: true,
-            });
-        }
+        pairs.push({ tag, startTag: `<${tag}>`, endTag: `</${tag}>`, content: match[2] || "" });
     }
     return pairs;
 }
@@ -1640,9 +1665,8 @@ function buildExtractRulesMessages(sampleText, pairs) {
         { role: "system", content: "你是格式规则提取助手。你只输出 JSON 数组，不输出解释、Markdown 或额外文本。" },
         { role: "user", content: [
             "请根据完整回复样例和已提取的标签，为每个标签生成格式检查规则建议。",
-            "输出 JSON 数组，每项包含 name、startTag、endTag、prompt、template。",
-            `如果 startTag 是 ${START_OF_REPLY_TAG}，必须原样保留，表示从回复开头到 endTag 之前的特殊块；这种规则只能有一个，且应排在规则列表顶部。`,
-            "prompt 要描述该标签内部内容应该满足的规则；template 要包含开始标签、占位内容和结束标签。",
+            "输出 JSON 数组，每项包含 name、startTag、endTag、prompt、template；如果输入项带 startAnchored:true，必须原样保留 startTag、startAnchored 和 forceTop。",
+            "prompt 要描述该标签内部内容应该满足的规则；template 要包含开始标签、占位内容和结束标签；若 startAnchored:true，则 template 从占位内容开始并以结束标签结束，不要编造开始标签。",
             "已提取标签：",
             JSON.stringify(pairs, null, 2),
             "完整回复样例：",
@@ -1656,18 +1680,22 @@ function normalizeExtractedRules(text) {
     const match = cleaned.match(/\[[\s\S]*\]/);
     const parsed = JSON.parse(match ? match[0] : cleaned);
     if (!Array.isArray(parsed)) throw new Error("AI 未返回规则数组");
-    const rules = parsed.map(item => ({
-        id: crypto?.randomUUID ? crypto.randomUUID() : String(Date.now() + Math.random()),
-        enabled: true,
-        name: String(item.name || "自动提取规则"),
-        startTag: String(item.startTag || ""),
-        endTag: String(item.endTag || ""),
-        prompt: String(item.prompt || ""),
-        template: String(item.template || `${item.startTag || ""}\n\n${item.endTag || ""}`),
-    })).filter(rule => rule.startTag && rule.endTag);
-
-    const firstSpecial = rules.find(rule => isStartOfReplyRule(rule));
-    return firstSpecial ? [firstSpecial, ...rules.filter(rule => !isStartOfReplyRule(rule))] : rules;
+    return parsed.map(item => {
+        const startAnchored = Boolean(item.startAnchored || item.forceTop || item.startTag === START_OF_TEXT_TAG || item.startTag === START_OF_TEXT_LABEL);
+        const endTag = String(item.endTag || "");
+        return {
+            id: crypto?.randomUUID ? crypto.randomUUID() : String(Date.now() + Math.random()),
+            enabled: true,
+            name: String(item.name || (startAnchored ? "开头特殊块" : "自动提取规则")),
+            startTag: startAnchored ? START_OF_TEXT_TAG : String(item.startTag || ""),
+            endTag,
+            prompt: String(item.prompt || ""),
+            template: String(item.template || (startAnchored ? `这里填写块内容\n${endTag}` : `${item.startTag || ""}\n\n${endTag}`)),
+            startAnchored,
+            forceTop: Boolean(item.forceTop || startAnchored),
+        };
+    }).filter(rule => (rule.startTag || isStartAnchoredRule(rule)) && rule.endTag)
+        .sort((a, b) => Number(Boolean(b.forceTop || isStartAnchoredRule(b))) - Number(Boolean(a.forceTop || isStartAnchoredRule(a))));
 }
 
 async function runExtractRules() {
@@ -1697,15 +1725,8 @@ function applyExtractedRules() {
     if (!state.extractedRules.length) return;
     const settings = getSettings();
     syncFormatRulesFromDom();
-    const incomingSpecial = state.extractedRules.find(rule => isStartOfReplyRule(rule));
-    if (incomingSpecial) {
-        settings.formatRules = settings.formatRules.filter(rule => !isStartOfReplyRule(rule));
-        settings.formatRules.unshift(incomingSpecial);
-        settings.formatRules.push(...state.extractedRules.filter(rule => !isStartOfReplyRule(rule)));
-    } else {
-        settings.formatRules.push(...state.extractedRules);
-    }
-    normalizeFormatRulesOrder(settings);
+    settings.formatRules.unshift(...state.extractedRules.filter(rule => rule.forceTop || isStartAnchoredRule(rule)));
+    settings.formatRules.push(...state.extractedRules.filter(rule => !(rule.forceTop || isStartAnchoredRule(rule))));
     state.extractedRules = [];
     saveSettings();
     renderFormatRules();
@@ -1787,7 +1808,6 @@ function renderProviderOptions() {
 function renderFormatRules() {
     const settings = getSettings();
     ensureBodyRule(settings, false);
-    normalizeFormatRulesOrder(settings);
     const body = getBodyRuleInfo(settings, false);
     const $list = $("#response_refiner_format_rules");
     $list.empty();
@@ -1801,12 +1821,11 @@ function renderFormatRules() {
         const $title = $("<div>", { class: "response-refiner-rule-title" });
         const $toggle = $("<span>", { class: "response-refiner-rule-toggle", title: "展开/关闭规则" }).append($("<i>", { class: "fa-solid fa-chevron-down response-refiner-rule-icon" }));
         const $enabled = $("<input>", { type: "checkbox", class: "response-refiner-rule-enabled", title: "启用规则" }).prop("checked", Boolean(rule.enabled));
-        const isStartRule = isStartOfReplyRule(rule);
         const $name = $("<input>", { class: "text_pole response-refiner-rule-name", type: "text", title: "规则名" }).val(rule.name || `规则 ${index + 1}`).prop("disabled", isBodyRule);
         $title.append($toggle, $enabled, $name);
         const $actions = $("<div>", { class: "response-refiner-rule-actions" });
-        $actions.append($("<button>", { type: "button", class: "menu_button response-refiner-rule-up", text: "上移" }).prop("disabled", isStartRule));
-        $actions.append($("<button>", { type: "button", class: "menu_button response-refiner-rule-down", text: "下移" }).prop("disabled", isStartRule));
+        $actions.append($("<button>", { type: "button", class: "menu_button response-refiner-rule-up", text: "上移" }));
+        $actions.append($("<button>", { type: "button", class: "menu_button response-refiner-rule-down", text: "下移" }));
         if (!isBodyRule) {
             $actions.append($("<button>", { type: "button", class: "menu_button response-refiner-rule-delete", text: "删除" }));
         }
@@ -1814,7 +1833,7 @@ function renderFormatRules() {
 
         const $body = $("<div>", { class: "response-refiner-rule-body" }).toggle(!collapsed);
         $body.append($("<label>", { text: "开始标签" }));
-        $body.append($("<input>", { class: "text_pole response-refiner-rule-start", type: "text", placeholder: "例如: <content>" }).val(rule.startTag || "").prop("disabled", isBodyRule || isStartRule));
+        $body.append($("<input>", { class: "text_pole response-refiner-rule-start", type: "text", placeholder: "例如: <content>" }).val(rule.startTag || "").prop("disabled", isBodyRule));
         $body.append($("<label>", { text: "结束标签" }));
         $body.append($("<input>", { class: "text_pole response-refiner-rule-end", type: "text", placeholder: "例如: </content>" }).val(rule.endTag || "").prop("disabled", isBodyRule));
         $body.append($("<label>", { text: "标签内提示词" }));
@@ -1842,7 +1861,6 @@ function syncFormatRulesFromDom() {
         });
     });
     ensureBodyRule(settings, false);
-    normalizeFormatRulesOrder(settings);
     saveSettings();
 }
 
