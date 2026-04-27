@@ -45,6 +45,51 @@ const DEFAULT_EXTRACT_CHAIN_RULE_PROMPT = [
     "生成或修正时应保持推理过程完整、连贯、顺序稳定，并确保最终以 {{endTag}} 正确闭合。",
 ].join("\n");
 
+const DEFAULT_REFINE_SYSTEM_TEMPLATE = "{{basePrompt}}\n\n{{forbiddenInstruction}}";
+const DEFAULT_REFINE_USER_TEMPLATE = "{{textToRefine}}";
+const DEFAULT_FORMAT_REPLACEMENT_SYSTEM_TEMPLATE = "你是严格的格式标签内容修正器。你只输出符合要求的 JSON 对象，不输出解释、完整回复、标签或 Markdown。";
+const DEFAULT_FORMAT_REPLACEMENT_USER_TEMPLATE = [
+    "你是 AI 回复格式检查和补全修正助手。",
+    "你只处理非正文标签；正文标签由润色功能处理，禁止输出或修改正文规则对应的内容。",
+    "你的任务是修正每个非正文规则对应标签内部的文本，使其满足标签提示词和模板要求。",
+    "为了减少输出 token，你绝对不要输出完整回复、开始标签、结束标签、解释或 Markdown 代码块。",
+    "你必须只输出一个 JSON 对象，键为规则ID，值为该规则标签内修正后的纯文本。",
+    "如果某个非正文标签不存在但规则要求补全，请仍在对应规则ID里输出应插入的标签内文本。",
+    "脚本会按照格式标签规则顺序重排标签块；若开始标签为“文本开头”，该块必须位于回复最开头。",
+    "格式标签规则：",
+    "{{formatRules}}",
+    "当前标签内内容：",
+    "{{currentSegmentsJson}}",
+    "完整 AI 回复文本仍作为上下文提供，但不要完整复述：",
+    "{{sourceText}}",
+].join("\n");
+const DEFAULT_FORMAT_FULL_SYSTEM_TEMPLATE = [
+    "你是 AI 回复格式检查和补全修正助手。",
+    "你只能根据用户提供的当前 AI 回复文本、格式标签规则、标签提示词和模板进行修正。",
+    "需要补全缺失标签、修复错误顺序、闭合不完整标签，并按模板与提示词修正标签内内容。",
+    "不得引入无关设定，不得解释修改过程。最终只输出完整修正后的 AI 回复。",
+    "格式标签规则：",
+    "{{formatRules}}",
+].join("\n");
+const DEFAULT_FORMAT_FULL_USER_TEMPLATE = "{{sourceText}}";
+const DEFAULT_COMPLETION_SYSTEM_TEMPLATE = [
+    "你是 AI 回复补完助手。当前 AI 回复可能被截断或缺少部分标签。",
+    "补完依据：需要补完回复的上一条用户消息始终是主上下文；如果提供思维链，则结合思维链和上一条用户消息；没有思维链时只依靠上一条用户消息。",
+    "{{completionRequirement}}",
+    "只输出需要追加到当前回复末尾的内容，不要重复已经存在的完整内容，不要输出说明、标题、分析或 Markdown 代码块。",
+    "{{completionPrompt}}",
+    "全部格式标签规则：",
+    "{{formatRules}}",
+].join("\n");
+const DEFAULT_COMPLETION_USER_TEMPLATE = [
+    "上一条用户消息：\n{{previousUserText}}",
+    "参考思维链：\n{{chainContext}}",
+    "截断/缺失检测：\n{{unclosedInfo}}",
+    "当前缺失或需要关注的标签规则：\n{{missingRules}}",
+    "已经生成但可能被截断的 AI 回复：\n{{sourceText}}",
+    "{{completionUserInstruction}}",
+].join("\n\n---\n\n");
+
 const DEFAULT_ENDPOINTS = {
     openrouter: "https://openrouter.ai/api/v1",
     gemini: "https://generativelanguage.googleapis.com/v1beta",
@@ -162,6 +207,14 @@ const DEFAULT_SETTINGS = {
     completionChainRegex: "",
     completionOutlineRegex: "",
     completionPrompt: "如果当前 AI 回复被截断，请根据格式规则、可用思维链或需要补完回复的上一条用户消息继续补完。只输出续写或缺失标签内容，不要解释。",
+    refineSystemTemplate: DEFAULT_REFINE_SYSTEM_TEMPLATE,
+    refineUserTemplate: DEFAULT_REFINE_USER_TEMPLATE,
+    formatReplacementSystemTemplate: DEFAULT_FORMAT_REPLACEMENT_SYSTEM_TEMPLATE,
+    formatReplacementUserTemplate: DEFAULT_FORMAT_REPLACEMENT_USER_TEMPLATE,
+    formatFullSystemTemplate: DEFAULT_FORMAT_FULL_SYSTEM_TEMPLATE,
+    formatFullUserTemplate: DEFAULT_FORMAT_FULL_USER_TEMPLATE,
+    completionSystemTemplate: DEFAULT_COMPLETION_SYSTEM_TEMPLATE,
+    completionUserTemplate: DEFAULT_COMPLETION_USER_TEMPLATE,
     extractRulesPrompt: DEFAULT_EXTRACT_RULES_PROMPT,
     extractChainRulePrompt: DEFAULT_EXTRACT_CHAIN_RULE_PROMPT,
     completionContextMessages: 0,
@@ -629,32 +682,79 @@ function escapeRegExp(value) {
     return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+function rangesOverlap(aStart, aEnd, bStart, bEnd) {
+    return aStart < bEnd && bStart < aEnd;
+}
+
+function isRangeOccupied(start, end, occupiedRanges) {
+    return occupiedRanges.some(range => rangesOverlap(start, end, range.start, range.end));
+}
+
+function findRuleMatchesOutsideOccupied(source, rule, occupiedRanges) {
+    const start = String(rule.realStartTag || rule.startTag || "");
+    const end = String(rule.endTag || "");
+    if (!end) return [];
+
+    const matches = [];
+    if (isStartAnchoredRule(rule) && (!rule.realStartTag || rule.realStartTag === START_OF_TEXT_TAG)) {
+        const endIndex = source.indexOf(end);
+        if (endIndex >= 0) {
+            const blockEnd = endIndex + end.length;
+            if (!isRangeOccupied(0, blockEnd, occupiedRanges)) {
+                matches.push({ contentStart: 0, contentEnd: endIndex, blockStart: 0, blockEnd });
+            }
+        }
+        return matches;
+    }
+
+    const actualStart = isStartAnchoredRule(rule) ? String(rule.realStartTag || "") : start;
+    if (!actualStart) return [];
+
+    let searchFrom = 0;
+    let guard = 0;
+    while (searchFrom < source.length && guard++ < 10000) {
+        const startIndex = source.indexOf(actualStart, searchFrom);
+        if (startIndex < 0) break;
+        const contentStart = startIndex + actualStart.length;
+        const endIndex = source.indexOf(end, contentStart);
+        if (endIndex < 0) break;
+        const blockEnd = endIndex + end.length;
+        if (!isRangeOccupied(startIndex, blockEnd, occupiedRanges)) {
+            matches.push({ contentStart, contentEnd: endIndex, blockStart: startIndex, blockEnd });
+        }
+        searchFrom = Math.max(startIndex + 1, blockEnd);
+    }
+    return matches;
+}
+
 function extractTaggedSegments(text, rules) {
     const source = String(text || "");
+    const occupiedRanges = [];
     return rules.map(rule => {
-        const start = String(rule.realStartTag || rule.startTag || "");
-        const end = String(rule.endTag || "");
-        if (!end) {
-            return { rule, key: getRuleKey(rule), content: "", found: false };
+        const matches = findRuleMatchesOutsideOccupied(source, rule, occupiedRanges);
+        const last = matches.length ? matches[matches.length - 1] : null;
+        if (last) {
+            occupiedRanges.push({ start: last.blockStart, end: last.blockEnd, key: getRuleKey(rule) });
         }
-        const regex = isStartAnchoredRule(rule)
-            ? (rule.realStartTag && rule.realStartTag !== START_OF_TEXT_TAG
-                ? new RegExp(`${escapeRegExp(rule.realStartTag)}([\\s\\S]*?)${escapeRegExp(end)}`, "g")
-                : new RegExp(`^([\\s\\S]*?)${escapeRegExp(end)}`))
-            : (start ? new RegExp(`${escapeRegExp(start)}([\\s\\S]*?)${escapeRegExp(end)}`, "g") : null);
-        if (!regex) {
-            return { rule, key: getRuleKey(rule), content: "", found: false };
-        }
-        const matches = [];
-        let match;
-        let guard = 0;
-        while ((match = regex.exec(source)) !== null) {
-            matches.push(match[1] || "");
-            if (match[0] === "") regex.lastIndex++;
-            if (++guard > 10000) break;
-        }
-        return { rule, key: getRuleKey(rule), content: matches.length ? matches[matches.length - 1] : "", found: matches.length > 0 };
+        return {
+            rule,
+            key: getRuleKey(rule),
+            content: last ? source.slice(last.contentStart, last.contentEnd) : "",
+            found: Boolean(last),
+            range: last ? { start: last.blockStart, end: last.blockEnd } : null,
+        };
     });
+}
+
+function renderTemplate(template, values) {
+    const source = String(template || "");
+    return source.replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g, (_match, key) => String(values[key] ?? ""));
+}
+
+function compactPromptText(text) {
+    return String(text || "")
+        .replace(/\n{3,}/g, "\n\n")
+        .trim();
 }
 
 function getNonBodyFormatRules(settings) {
@@ -674,59 +774,39 @@ function buildFormatRulesTextForRules(rules) {
     ].join("\n")).join("\n\n");
 }
 
-function buildFormatReplacementPromptText(sourceText, settings) {
+function buildFormatReplacementValues(sourceText, settings) {
     const rules = getNonBodyFormatRules(settings);
     const segments = extractTaggedSegments(sourceText, rules);
-    return [
-        "你是 AI 回复格式检查和补全修正助手。",
-        "你只处理非正文标签；正文标签由润色功能处理，禁止输出或修改正文规则对应的内容。",
-        "你的任务是修正每个非正文规则对应标签内部的文本，使其满足标签提示词和模板要求。",
-        "为了减少输出 token，你绝对不要输出完整回复、开始标签、结束标签、解释或 Markdown 代码块。",
-        "你必须只输出一个 JSON 对象，键为规则ID，值为该规则标签内修正后的纯文本。",
-        "如果某个非正文标签不存在但规则要求补全，请仍在对应规则ID里输出应插入的标签内文本。",
-        "脚本会按照格式标签规则顺序重排标签块；若开始标签为“文本开头”，该块必须位于回复最开头。",
-        "格式标签规则：",
-        buildFormatRulesTextForRules(rules),
-        "当前标签内内容：",
-        JSON.stringify(Object.fromEntries(segments.map(item => [item.key, item.content])), null, 2),
-        "完整 AI 回复文本仍作为上下文提供，但不要完整复述：",
+    return {
         sourceText,
-    ].join("\n");
+        formatRules: buildFormatRulesTextForRules(rules),
+        currentSegmentsJson: JSON.stringify(Object.fromEntries(segments.map(item => [item.key, item.content])), null, 2),
+    };
 }
 
 function buildRefineMessages(sourceText, settings, isUser) {
     const basePrompt = isUser ? settings.userPrompt : settings.prompt;
     const forbiddenInstruction = buildForbiddenInstruction(settings);
-    const system = [basePrompt, forbiddenInstruction]
-        .filter(Boolean)
-        .join("\n\n");
-
+    const values = { basePrompt, forbiddenInstruction, textToRefine: sourceText, sourceText, messageType: isUser ? "user" : "assistant" };
     return [
-        { role: "system", content: system },
-        { role: "user", content: sourceText },
+        { role: "system", content: compactPromptText(renderTemplate(settings.refineSystemTemplate || DEFAULT_REFINE_SYSTEM_TEMPLATE, values)) },
+        { role: "user", content: renderTemplate(settings.refineUserTemplate || DEFAULT_REFINE_USER_TEMPLATE, values) },
     ];
 }
 
 function buildFormatMessages(sourceText, settings, replacementOnly = false) {
     if (replacementOnly) {
+        const values = buildFormatReplacementValues(sourceText, settings);
         return [
-            { role: "system", content: "你是严格的格式标签内容修正器。你只输出符合要求的 JSON 对象，不输出解释、完整回复、标签或 Markdown。" },
-            { role: "user", content: buildFormatReplacementPromptText(sourceText, settings) },
+            { role: "system", content: compactPromptText(renderTemplate(settings.formatReplacementSystemTemplate || DEFAULT_FORMAT_REPLACEMENT_SYSTEM_TEMPLATE, values)) },
+            { role: "user", content: compactPromptText(renderTemplate(settings.formatReplacementUserTemplate || DEFAULT_FORMAT_REPLACEMENT_USER_TEMPLATE, values)) },
         ];
     }
 
-    const system = [
-        "你是 AI 回复格式检查和补全修正助手。",
-        "你只能根据用户提供的当前 AI 回复文本、格式标签规则、标签提示词和模板进行修正。",
-        "需要补全缺失标签、修复错误顺序、闭合不完整标签，并按模板与提示词修正标签内内容。",
-        "不得引入无关设定，不得解释修改过程。最终只输出完整修正后的 AI 回复。",
-        "格式标签规则：",
-        buildFormatRulesText(settings),
-    ].join("\n");
-
+    const values = { sourceText, formatRules: buildFormatRulesText(settings) };
     return [
-        { role: "system", content: system },
-        { role: "user", content: sourceText },
+        { role: "system", content: compactPromptText(renderTemplate(settings.formatFullSystemTemplate || DEFAULT_FORMAT_FULL_SYSTEM_TEMPLATE, values)) },
+        { role: "user", content: renderTemplate(settings.formatFullUserTemplate || DEFAULT_FORMAT_FULL_USER_TEMPLATE, values) },
     ];
 }
 
@@ -789,36 +869,32 @@ function buildCompletionMessages(sourceText, settings, messageId, missingRules =
         ? `最后一个未闭合标签：${plan.unclosed.rule.name || getRuleKey(plan.unclosed.rule)} ${plan.unclosed.rule.startTag} ... ${plan.unclosed.rule.endTag}`
         : "未检测到未闭合标签。";
 
-    const system = [
-        "你是 AI 回复补完助手。当前 AI 回复可能被截断或缺少部分标签。",
-        "补完依据：需要补完回复的上一条用户消息始终是主上下文；如果提供思维链，则结合思维链和上一条用户消息；没有思维链时只依靠上一条用户消息。",
-        plan.isBodyUnclosed
-            ? "关键要求：当前最后一个未闭合标签是正文标签。你必须优先从截断处继续写正文内容，不能只输出正文结束标签，也不能立刻跳到下一个标签。正文续写完整后，可以继续输出正文结束标签与后续缺失标签内容。"
-            : "你必须配合格式检查规则继续生成剩余部分，续写内容需要满足标签顺序、开始标签、结束标签、标签内提示词和模板要求。",
-        "只输出需要追加到当前回复末尾的内容，不要重复已经存在的完整内容，不要输出说明、标题、分析或 Markdown 代码块。",
-        settings.completionPrompt || "",
-        "全部格式标签规则：",
-        buildFormatRulesText(settings),
-    ].filter(Boolean).join("\n");
+    const completionRequirement = plan.isBodyUnclosed
+        ? "关键要求：当前最后一个未闭合标签是正文标签。你必须优先从截断处继续写正文内容，不能只输出正文结束标签，也不能立刻跳到下一个标签。正文续写完整后，可以继续输出正文结束标签与后续缺失标签内容。"
+        : "你必须配合格式检查规则继续生成剩余部分，续写内容需要满足标签顺序、开始标签、结束标签、标签内提示词和模板要求。";
 
     const chainRegexText = String(settings.completionChainRegex || settings.completionOutlineRegex || "").trim();
     const chainMissText = chainRegexText
         ? `参考思维链：未匹配到，禁止自行编造思维链。\n调试信息：已使用正则 ${chainRegexText} 匹配当前 AI 回复文本，文本长度 ${String(sourceText || "").length}。`
         : "参考思维链：未配置捕获正则，禁止自行编造思维链。";
-    const user = [
-        `上一条用户消息：\n${previousUserText || "未找到上一条用户消息"}`,
-        chain ? `参考思维链：\n${chain}` : chainMissText,
-        `截断/缺失检测：\n${unclosedText}`,
-        `当前缺失或需要关注的标签规则：\n${missingText}`,
-        `已经生成但可能被截断的 AI 回复：\n${sourceText}`,
-        plan.isBodyUnclosed
-            ? "请从正文截断处继续写，先补完整正文内容，再输出必要的正文结束标签和后续缺失标签。"
-            : "请只输出需要追加到当前回复末尾的内容。",
-    ].join("\n\n---\n\n");
+    const completionUserInstruction = plan.isBodyUnclosed
+        ? "请从正文截断处继续写，先补完整正文内容，再输出必要的正文结束标签和后续缺失标签。"
+        : "请只输出需要追加到当前回复末尾的内容。";
+    const values = {
+        sourceText,
+        previousUserText: previousUserText || "未找到上一条用户消息",
+        chainContext: chain || chainMissText,
+        unclosedInfo: unclosedText,
+        missingRules: missingText,
+        formatRules: buildFormatRulesText(settings),
+        completionPrompt: settings.completionPrompt || "",
+        completionRequirement,
+        completionUserInstruction,
+    };
 
     return [
-        { role: "system", content: system },
-        { role: "user", content: user },
+        { role: "system", content: compactPromptText(renderTemplate(settings.completionSystemTemplate || DEFAULT_COMPLETION_SYSTEM_TEMPLATE, values)) },
+        { role: "user", content: compactPromptText(renderTemplate(settings.completionUserTemplate || DEFAULT_COMPLETION_USER_TEMPLATE, values)) },
     ];
 }
 
@@ -1354,13 +1430,14 @@ function getStatusKey(messageId) {
     return `${messageId}:active`;
 }
 
-function appendStatus(messageId, stage, text, reset = false, stateClass = "") {
+function appendStatus(messageId, stage, text, reset = false, stateClass = "", options = {}) {
     if (!getSettings().streamStatusEnabled) return;
     const key = getStatusKey(messageId);
     if (reset) state.statusBuffers.set(key, "");
     const stamp = new Date().toLocaleTimeString();
     const value = String(text || "");
-    const next = (state.statusBuffers.get(key) || "") + (value ? `[${stamp}] ${value}` : "");
+    const chunk = options.timestamp === false ? value : `[${stamp}] ${value}`;
+    const next = (state.statusBuffers.get(key) || "") + (value ? chunk : "");
     state.statusBuffers.set(key, next);
     const $panel = $(`#chat .mes[mesid="${messageId}"] .response-refiner-status-panel`).last();
     if (!$panel.length) return;
@@ -1385,7 +1462,7 @@ function runStageWithStatus(messageId, stage, fn) {
             outputStarted = true;
             appendStatus(messageId, stage, "收到模型输出：\n");
         }
-        appendStatus(messageId, stage, token);
+        appendStatus(messageId, stage, token, false, "", { timestamp: false });
     };
     const onStatus = text => appendStatus(messageId, stage, text);
     return fn(onToken, onStatus).then(result => {
@@ -1963,7 +2040,7 @@ function fillPromptPreviewSourceFromLatestAssistant(force = false) {
 
 function updatePromptPreview() {
     const isUser = String($("#response_refiner_prompt_preview_type").val() || "assistant") === "user";
-    const source = String(fillPromptPreviewSourceFromLatestAssistant(false) || "");
+    const source = String($("#response_refiner_prompt_preview_source").val() || "");
     const selected = String($("#response_refiner_prompt_preview_part").val() || "refine");
     const settings = getSettings();
     const chainRegex = String(settings.completionChainRegex || settings.completionOutlineRegex || "");
@@ -2053,10 +2130,11 @@ function renderFormatRules() {
 
 function syncFormatRulesFromDom() {
     const settings = getSettings();
+    const oldRules = settings.formatRules || [];
     settings.formatRules = [];
     $("#response_refiner_format_rules .response-refiner-rule-card").each(function () {
         const $card = $(this);
-        const existingRule = settings.formatRules[Number($card.data("index"))] || {};
+        const existingRule = oldRules[Number($card.data("index"))] || {};
         const startOnly = isStartOnlyAnchoredRule(existingRule);
         const startValue = String($card.find(".response-refiner-rule-start").val() || "");
         settings.formatRules.push({
@@ -2204,6 +2282,68 @@ function bindSettings() {
     $("#response_refiner_completion_prompt").val(settings.completionPrompt).on("input", function () {
         settings.completionPrompt = String($(this).val());
         saveSettings();
+        updatePromptPreview();
+    });
+    $("#response_refiner_refine_system_template").val(settings.refineSystemTemplate || DEFAULT_REFINE_SYSTEM_TEMPLATE).on("input", function () {
+        settings.refineSystemTemplate = String($(this).val()) || DEFAULT_REFINE_SYSTEM_TEMPLATE;
+        saveSettings();
+        updatePromptPreview();
+    });
+    $("#response_refiner_refine_user_template").val(settings.refineUserTemplate || DEFAULT_REFINE_USER_TEMPLATE).on("input", function () {
+        settings.refineUserTemplate = String($(this).val()) || DEFAULT_REFINE_USER_TEMPLATE;
+        saveSettings();
+        updatePromptPreview();
+    });
+    $("#response_refiner_format_replacement_system_template").val(settings.formatReplacementSystemTemplate || DEFAULT_FORMAT_REPLACEMENT_SYSTEM_TEMPLATE).on("input", function () {
+        settings.formatReplacementSystemTemplate = String($(this).val()) || DEFAULT_FORMAT_REPLACEMENT_SYSTEM_TEMPLATE;
+        saveSettings();
+        updatePromptPreview();
+    });
+    $("#response_refiner_format_replacement_user_template").val(settings.formatReplacementUserTemplate || DEFAULT_FORMAT_REPLACEMENT_USER_TEMPLATE).on("input", function () {
+        settings.formatReplacementUserTemplate = String($(this).val()) || DEFAULT_FORMAT_REPLACEMENT_USER_TEMPLATE;
+        saveSettings();
+        updatePromptPreview();
+    });
+    $("#response_refiner_format_full_system_template").val(settings.formatFullSystemTemplate || DEFAULT_FORMAT_FULL_SYSTEM_TEMPLATE).on("input", function () {
+        settings.formatFullSystemTemplate = String($(this).val()) || DEFAULT_FORMAT_FULL_SYSTEM_TEMPLATE;
+        saveSettings();
+        updatePromptPreview();
+    });
+    $("#response_refiner_format_full_user_template").val(settings.formatFullUserTemplate || DEFAULT_FORMAT_FULL_USER_TEMPLATE).on("input", function () {
+        settings.formatFullUserTemplate = String($(this).val()) || DEFAULT_FORMAT_FULL_USER_TEMPLATE;
+        saveSettings();
+        updatePromptPreview();
+    });
+    $("#response_refiner_completion_system_template").val(settings.completionSystemTemplate || DEFAULT_COMPLETION_SYSTEM_TEMPLATE).on("input", function () {
+        settings.completionSystemTemplate = String($(this).val()) || DEFAULT_COMPLETION_SYSTEM_TEMPLATE;
+        saveSettings();
+        updatePromptPreview();
+    });
+    $("#response_refiner_completion_user_template").val(settings.completionUserTemplate || DEFAULT_COMPLETION_USER_TEMPLATE).on("input", function () {
+        settings.completionUserTemplate = String($(this).val()) || DEFAULT_COMPLETION_USER_TEMPLATE;
+        saveSettings();
+        updatePromptPreview();
+    });
+    $("#response_refiner_prompt_template_reset").on("click", function () {
+        Object.assign(settings, {
+            refineSystemTemplate: DEFAULT_REFINE_SYSTEM_TEMPLATE,
+            refineUserTemplate: DEFAULT_REFINE_USER_TEMPLATE,
+            formatReplacementSystemTemplate: DEFAULT_FORMAT_REPLACEMENT_SYSTEM_TEMPLATE,
+            formatReplacementUserTemplate: DEFAULT_FORMAT_REPLACEMENT_USER_TEMPLATE,
+            formatFullSystemTemplate: DEFAULT_FORMAT_FULL_SYSTEM_TEMPLATE,
+            formatFullUserTemplate: DEFAULT_FORMAT_FULL_USER_TEMPLATE,
+            completionSystemTemplate: DEFAULT_COMPLETION_SYSTEM_TEMPLATE,
+            completionUserTemplate: DEFAULT_COMPLETION_USER_TEMPLATE,
+        });
+        saveSettings();
+        $("#response_refiner_refine_system_template").val(settings.refineSystemTemplate);
+        $("#response_refiner_refine_user_template").val(settings.refineUserTemplate);
+        $("#response_refiner_format_replacement_system_template").val(settings.formatReplacementSystemTemplate);
+        $("#response_refiner_format_replacement_user_template").val(settings.formatReplacementUserTemplate);
+        $("#response_refiner_format_full_system_template").val(settings.formatFullSystemTemplate);
+        $("#response_refiner_format_full_user_template").val(settings.formatFullUserTemplate);
+        $("#response_refiner_completion_system_template").val(settings.completionSystemTemplate);
+        $("#response_refiner_completion_user_template").val(settings.completionUserTemplate);
         updatePromptPreview();
     });
     $("#response_refiner_prompt_preview_type, #response_refiner_prompt_preview_part, #response_refiner_prompt_preview_source").on("input change", updatePromptPreview);
