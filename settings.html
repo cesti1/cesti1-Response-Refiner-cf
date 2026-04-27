@@ -74,27 +74,19 @@
             </div>
 
             <div class="response-refiner-section" data-section-id="prompt-templates">
-                <div class="response-refiner-section-header" role="button" tabindex="0"><h4>高级：完整提示词模板</h4><i class="fa-solid fa-chevron-down response-refiner-section-icon"></i></div>
+                <div class="response-refiner-section-header" role="button" tabindex="0"><h4>高级：请求结构模板（可选）</h4><i class="fa-solid fa-chevron-down response-refiner-section-icon"></i></div>
                 <div class="response-refiner-section-body">
-                    <div class="response-refiner-note marginBot8">这里控制实际请求和提示词预览使用的完整消息模板。可用占位符会在请求前替换为真实内容；如果删掉关键占位符，对应上下文就不会进入模型。功能1可用：{{basePrompt}}、{{forbiddenInstruction}}、{{textToRefine}}、{{sourceText}}、{{messageType}}。功能2可用：{{formatRules}}、{{currentSegmentsJson}}、{{sourceText}}。功能3可用：{{previousUserText}}、{{chainContext}}、{{unclosedInfo}}、{{missingRules}}、{{formatRules}}、{{completionPrompt}}、{{completionRequirement}}、{{completionUserInstruction}}、{{sourceText}}。</div>
+                    <div class="response-refiner-note marginBot8">三个功能栏中的提示词、格式规则和补完要求是主要编辑入口，并会自动合并进实际请求的 system 消息。这里仅保留可选的 user 消息结构模板，用于调整待处理文本与上下文的组合方式；system 结构由脚本固定组合，避免重复维护同一含义的提示词。可用占位符：功能1：{{textToRefine}}、{{sourceText}}、{{messageType}}。功能2：{{formatRules}}、{{currentSegmentsJson}}、{{sourceText}}。功能3：{{previousUserText}}、{{chainContext}}、{{unclosedInfo}}、{{missingRules}}、{{formatRules}}、{{completionPrompt}}、{{completionRequirement}}、{{completionUserInstruction}}、{{sourceText}}。</div>
                     <div class="response-refiner-button-row marginBot8">
                         <button id="response_refiner_prompt_template_reset" type="button" class="menu_button response-refiner-menu-button"><i class="fa-solid fa-rotate-left"></i><span>恢复默认完整模板</span></button>
                     </div>
-                    <label for="response_refiner_refine_system_template">功能1 system 模板：定义润色助手身份、基础润色要求和禁用短语处理规则</label>
-                    <textarea id="response_refiner_refine_system_template" class="text_pole marginBot8" rows="4"></textarea>
-                    <label for="response_refiner_refine_user_template">功能1 user 模板：放入实际要润色的文本</label>
+                    <label for="response_refiner_refine_user_template">功能1 user 结构模板：放入实际要润色的文本</label>
                     <textarea id="response_refiner_refine_user_template" class="text_pole marginBot8" rows="3"></textarea>
-                    <label for="response_refiner_format_replacement_system_template">功能2 system 模板：限定模型只返回非正文标签内容替换 JSON</label>
-                    <textarea id="response_refiner_format_replacement_system_template" class="text_pole marginBot8" rows="3"></textarea>
-                    <label for="response_refiner_format_replacement_user_template">功能2 user 模板：提供格式规则、当前标签内内容和完整回复上下文</label>
+                    <label for="response_refiner_format_replacement_user_template">功能2 user 结构模板：提供格式规则、当前标签内内容和完整回复上下文</label>
                     <textarea id="response_refiner_format_replacement_user_template" class="text_pole marginBot8" rows="10"></textarea>
-                    <label for="response_refiner_format_full_system_template">功能2完整回复模式 system 模板：用于非替换模式的整篇格式修正</label>
-                    <textarea id="response_refiner_format_full_system_template" class="text_pole marginBot8" rows="5"></textarea>
-                    <label for="response_refiner_format_full_user_template">功能2完整回复模式 user 模板：放入待整体修正的完整回复</label>
+                    <label for="response_refiner_format_full_user_template">功能2完整回复模式 user 结构模板：放入待整体修正的完整回复</label>
                     <textarea id="response_refiner_format_full_user_template" class="text_pole marginBot8" rows="3"></textarea>
-                    <label for="response_refiner_completion_system_template">功能3 system 模板：定义补完依据、续写边界、格式规则和自定义补完要求</label>
-                    <textarea id="response_refiner_completion_system_template" class="text_pole marginBot8" rows="7"></textarea>
-                    <label for="response_refiner_completion_user_template">功能3 user 模板：提供上一条用户消息、思维链、缺失标签、截断回复和补完指令</label>
+                    <label for="response_refiner_completion_user_template">功能3 user 结构模板：提供上一条用户消息、思维链、缺失标签、截断回复和补完指令</label>
                     <textarea id="response_refiner_completion_user_template" class="text_pole marginBot8" rows="9"></textarea>
                 </div>
             </div>

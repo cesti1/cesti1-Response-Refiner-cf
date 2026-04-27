@@ -301,19 +301,14 @@ function migrateLegacySettings(settings) {
 }
 
 function migratePromptTemplates(settings) {
-    const formatSystem = String(settings.formatReplacementSystemTemplate || "");
-    if (!formatSystem.includes("JSON 的值只能是目标标签内部纯文本")) {
-        settings.formatReplacementSystemTemplate = DEFAULT_FORMAT_REPLACEMENT_SYSTEM_TEMPLATE;
-    }
+    settings.refineSystemTemplate = DEFAULT_REFINE_SYSTEM_TEMPLATE;
+    settings.formatReplacementSystemTemplate = DEFAULT_FORMAT_REPLACEMENT_SYSTEM_TEMPLATE;
+    settings.formatFullSystemTemplate = DEFAULT_FORMAT_FULL_SYSTEM_TEMPLATE;
+    settings.completionSystemTemplate = DEFAULT_COMPLETION_SYSTEM_TEMPLATE;
 
     const formatUser = String(settings.formatReplacementUserTemplate || "");
     if (!formatUser.includes("JSON 值必须是最终要写入该标签内部的实际内容")) {
         settings.formatReplacementUserTemplate = DEFAULT_FORMAT_REPLACEMENT_USER_TEMPLATE;
-    }
-
-    const completionSystem = String(settings.completionSystemTemplate || "");
-    if (!completionSystem.includes("禁止照搬标签内容模板") || !completionSystem.includes("不要再次输出 </think>")) {
-        settings.completionSystemTemplate = DEFAULT_COMPLETION_SYSTEM_TEMPLATE;
     }
 }
 
@@ -458,8 +453,7 @@ function extractTextToRefine(text, settings) {
             }
         }
         return matches.length ? matches[matches.length - 1] : text;
-    } catch (error) {
-        console.error("[Response Refiner] 正则表达式错误:", error);
+    } catch (_error) {
         toastr.error("正则表达式错误，已改为处理全文", "Response Refiner");
         return text;
     }
@@ -496,8 +490,7 @@ function replaceRefinedText(originalText, refinedText, settings) {
         }
 
         return before + refinedText + after;
-    } catch (error) {
-        console.error("[Response Refiner] 文本替换错误:", error);
+    } catch (_error) {
         return refinedText;
     }
 }
@@ -598,8 +591,7 @@ function extractChainContext(text, regexText) {
             .map(candidate => findStartAnchoredChainByEndTag(candidate, regexText))
             .find(Boolean);
         return fallback || "";
-    } catch (error) {
-        console.error("[Response Refiner] 思维链捕获正则错误:", error);
+    } catch (_error) {
         toastr.warning("思维链捕获正则错误，已仅使用上一条用户消息", "回复补完");
         return "";
     }
@@ -817,7 +809,7 @@ function buildRefineMessages(sourceText, settings, isUser) {
     const forbiddenInstruction = buildForbiddenInstruction(settings);
     const values = { basePrompt, forbiddenInstruction, textToRefine: sourceText, sourceText, messageType: isUser ? "user" : "assistant" };
     return [
-        { role: "system", content: compactPromptText(renderTemplate(settings.refineSystemTemplate || DEFAULT_REFINE_SYSTEM_TEMPLATE, values)) },
+        { role: "system", content: compactPromptText(renderTemplate(DEFAULT_REFINE_SYSTEM_TEMPLATE, values)) },
         { role: "user", content: renderTemplate(settings.refineUserTemplate || DEFAULT_REFINE_USER_TEMPLATE, values) },
     ];
 }
@@ -826,14 +818,14 @@ function buildFormatMessages(sourceText, settings, replacementOnly = false) {
     if (replacementOnly) {
         const values = buildFormatReplacementValues(sourceText, settings);
         return [
-            { role: "system", content: compactPromptText(renderTemplate(settings.formatReplacementSystemTemplate || DEFAULT_FORMAT_REPLACEMENT_SYSTEM_TEMPLATE, values)) },
+            { role: "system", content: compactPromptText(renderTemplate(DEFAULT_FORMAT_REPLACEMENT_SYSTEM_TEMPLATE, values)) },
             { role: "user", content: compactPromptText(renderTemplate(settings.formatReplacementUserTemplate || DEFAULT_FORMAT_REPLACEMENT_USER_TEMPLATE, values)) },
         ];
     }
 
     const values = { sourceText, formatRules: buildFormatRulesText(settings) };
     return [
-        { role: "system", content: compactPromptText(renderTemplate(settings.formatFullSystemTemplate || DEFAULT_FORMAT_FULL_SYSTEM_TEMPLATE, values)) },
+        { role: "system", content: compactPromptText(renderTemplate(DEFAULT_FORMAT_FULL_SYSTEM_TEMPLATE, values)) },
         { role: "user", content: renderTemplate(settings.formatFullUserTemplate || DEFAULT_FORMAT_FULL_USER_TEMPLATE, values) },
     ];
 }
@@ -921,7 +913,7 @@ function buildCompletionMessages(sourceText, settings, messageId, missingRules =
     };
 
     return [
-        { role: "system", content: compactPromptText(renderTemplate(settings.completionSystemTemplate || DEFAULT_COMPLETION_SYSTEM_TEMPLATE, values)) },
+        { role: "system", content: compactPromptText(renderTemplate(DEFAULT_COMPLETION_SYSTEM_TEMPLATE, values)) },
         { role: "user", content: compactPromptText(renderTemplate(settings.completionUserTemplate || DEFAULT_COMPLETION_USER_TEMPLATE, values)) },
     ];
 }
@@ -1218,7 +1210,6 @@ async function refreshProviderModels() {
         updateModelSelect(providerKey);
         toastr.success(`已获取 ${models.length} 个模型`, "模型列表");
     } catch (error) {
-        console.error("[Response Refiner] 获取模型列表失败:", error);
         toastr.error(`获取模型列表失败: ${error instanceof Error ? error.message : String(error)}`, "模型列表");
         updateModelSelect(providerKey);
     } finally {
@@ -1249,7 +1240,6 @@ async function testConnection() {
         }
         toastr.success("连接测试成功", "测试连接");
     } catch (error) {
-        console.error("[Response Refiner] 连接测试失败:", error);
         toastr.error(`连接测试失败: ${error instanceof Error ? error.message : String(error)}`, "测试连接");
     }
 }
@@ -1645,7 +1635,6 @@ async function requestFeature(messageId, feature) {
             setStatusFinal(resolvedId, "已停止", "请求已停止。\n", "response-refiner-status-stopped");
             toastr.warning("请求已停止", "Response Refiner");
         } else {
-            console.error("[Response Refiner] 处理失败:", error);
             setStatusFinal(resolvedId, "处理失败", `${String(error instanceof Error ? error.message : error)}\n`, "response-refiner-status-error");
             toastr.error(String(error instanceof Error ? error.message : error), "Response Refiner");
         }
@@ -1998,15 +1987,6 @@ async function runExtractRules() {
     const anchoredPairs = chainPair ? [chainPair] : [];
     const fixedRules = anchoredPairs.map(createAnchoredRuleFromPair);
     const extractMessages = normalPairs.length ? buildExtractRulesMessages(sample, normalPairs) : [];
-    console.group("[Response Refiner][Debug] 自动提取格式规则");
-    console.log("完整回复样例:", sample);
-    console.log("脚本提取到的标签 pairs:", pairs);
-    console.log("开头特殊块 anchoredPairs:", anchoredPairs);
-    console.log("交给 AI 生成规则的普通标签 normalPairs:", normalPairs);
-    console.log("脚本直接生成的开头规则 fixedRules:", fixedRules);
-    console.log("发送给 AI 的 messages:", extractMessages);
-    console.log("发送给 AI 的提示词文本:", extractMessages.map(message => `${message.role}:\n${message.content}`).join("\n\n---\n\n"));
-    console.groupEnd();
     const $button = $("#response_refiner_extract_run");
     $button.prop("disabled", true).find("i").addClass("fa-spin");
     try {
@@ -2020,7 +2000,6 @@ async function runExtractRules() {
         $("#response_refiner_extract_apply").prop("disabled", !state.extractedRules.length);
         toastr.success(`已生成 ${state.extractedRules.length} 条规则建议`, "自动提取格式规则");
     } catch (error) {
-        console.error("[Response Refiner] 自动提取格式规则失败:", error);
         toastr.error(String(error instanceof Error ? error.message : error), "自动提取格式规则");
     } finally {
         $button.prop("disabled", false).find("i").removeClass("fa-spin");
@@ -2088,16 +2067,6 @@ function updatePromptPreview() {
     const isUser = String($("#response_refiner_prompt_preview_type").val() || "assistant") === "user";
     const source = String($("#response_refiner_prompt_preview_source").val() || "");
     const selected = String($("#response_refiner_prompt_preview_part").val() || "refine");
-    const settings = getSettings();
-    const chainRegex = String(settings.completionChainRegex || settings.completionOutlineRegex || "");
-    if (selected === "completion" && !isUser) {
-        console.group("[Response Refiner][Debug] 提示词预览 - 回复补完思维链捕获");
-        console.log("使用的思维链正则:", chainRegex);
-        console.log("用于捕获的源文本:", source || "【这里是待处理文本】");
-        console.log("源文本长度:", String(source || "【这里是待处理文本】").length);
-        console.log("捕获结果:", extractChainContext(source || "【这里是待处理文本】", chainRegex));
-        console.groupEnd();
-    }
     const blocks = buildPromptPreviewBlocks(source, isUser);
     $("#response_refiner_prompt_preview_output").text(blocks[selected] || blocks.refine);
 }
@@ -2330,18 +2299,8 @@ function bindSettings() {
         saveSettings();
         updatePromptPreview();
     });
-    $("#response_refiner_refine_system_template").val(settings.refineSystemTemplate || DEFAULT_REFINE_SYSTEM_TEMPLATE).on("input", function () {
-        settings.refineSystemTemplate = String($(this).val()) || DEFAULT_REFINE_SYSTEM_TEMPLATE;
-        saveSettings();
-        updatePromptPreview();
-    });
     $("#response_refiner_refine_user_template").val(settings.refineUserTemplate || DEFAULT_REFINE_USER_TEMPLATE).on("input", function () {
         settings.refineUserTemplate = String($(this).val()) || DEFAULT_REFINE_USER_TEMPLATE;
-        saveSettings();
-        updatePromptPreview();
-    });
-    $("#response_refiner_format_replacement_system_template").val(settings.formatReplacementSystemTemplate || DEFAULT_FORMAT_REPLACEMENT_SYSTEM_TEMPLATE).on("input", function () {
-        settings.formatReplacementSystemTemplate = String($(this).val()) || DEFAULT_FORMAT_REPLACEMENT_SYSTEM_TEMPLATE;
         saveSettings();
         updatePromptPreview();
     });
@@ -2350,18 +2309,8 @@ function bindSettings() {
         saveSettings();
         updatePromptPreview();
     });
-    $("#response_refiner_format_full_system_template").val(settings.formatFullSystemTemplate || DEFAULT_FORMAT_FULL_SYSTEM_TEMPLATE).on("input", function () {
-        settings.formatFullSystemTemplate = String($(this).val()) || DEFAULT_FORMAT_FULL_SYSTEM_TEMPLATE;
-        saveSettings();
-        updatePromptPreview();
-    });
     $("#response_refiner_format_full_user_template").val(settings.formatFullUserTemplate || DEFAULT_FORMAT_FULL_USER_TEMPLATE).on("input", function () {
         settings.formatFullUserTemplate = String($(this).val()) || DEFAULT_FORMAT_FULL_USER_TEMPLATE;
-        saveSettings();
-        updatePromptPreview();
-    });
-    $("#response_refiner_completion_system_template").val(settings.completionSystemTemplate || DEFAULT_COMPLETION_SYSTEM_TEMPLATE).on("input", function () {
-        settings.completionSystemTemplate = String($(this).val()) || DEFAULT_COMPLETION_SYSTEM_TEMPLATE;
         saveSettings();
         updatePromptPreview();
     });
@@ -2382,13 +2331,9 @@ function bindSettings() {
             completionUserTemplate: DEFAULT_COMPLETION_USER_TEMPLATE,
         });
         saveSettings();
-        $("#response_refiner_refine_system_template").val(settings.refineSystemTemplate);
         $("#response_refiner_refine_user_template").val(settings.refineUserTemplate);
-        $("#response_refiner_format_replacement_system_template").val(settings.formatReplacementSystemTemplate);
         $("#response_refiner_format_replacement_user_template").val(settings.formatReplacementUserTemplate);
-        $("#response_refiner_format_full_system_template").val(settings.formatFullSystemTemplate);
         $("#response_refiner_format_full_user_template").val(settings.formatFullUserTemplate);
-        $("#response_refiner_completion_system_template").val(settings.completionSystemTemplate);
         $("#response_refiner_completion_user_template").val(settings.completionUserTemplate);
         updatePromptPreview();
     });
@@ -2498,8 +2443,7 @@ async function loadSettingsHtml() {
             if (response.ok) {
                 return response.text();
             }
-        } catch (error) {
-            console.warn(`[Response Refiner] settings.html 加载失败: ${url}`, error);
+        } catch (_error) {
         }
     }
 
@@ -2560,10 +2504,8 @@ $(async () => {
         }
         eventSource.on(event_types.CHAT_CHANGED, refreshAllMessageButtons);
         refreshAllMessageButtons();
-        console.info("[Response Refiner] 扩展加载完成");
     } catch (error) {
         state.initialized = false;
-        console.error("[Response Refiner] 扩展初始化失败:", error);
         toastr?.error?.(error instanceof Error ? error.message : String(error), "Response Refiner 初始化失败");
     }
 });

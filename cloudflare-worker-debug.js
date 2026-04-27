@@ -7,8 +7,6 @@
 
 const UPSTREAM_URL = 'https://example.invalid/v1';
 const ALLOWED_ORIGINS = ['*'];
-const DEBUG = true;
-
 addEventListener('fetch', event => {
   event.respondWith(handleRequest(event.request));
 });
@@ -29,13 +27,6 @@ async function handleRequest(request) {
     const url = new URL(request.url);
     const pathname = url.pathname.endsWith('/models') ? '/models' : '/chat/completions';
     const upstreamUrl = `${UPSTREAM_URL}${pathname}`;
-
-    if (DEBUG) {
-      console.log('Response Refiner Worker debug:', JSON.stringify({
-        method: request.method,
-        pathname,
-      }));
-    }
 
     const upstreamRequest = new Request(upstreamUrl, {
       method: request.method,
