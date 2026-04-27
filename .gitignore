@@ -10,6 +10,17 @@ Thumbs.db
 *.bak
 fix_escape.ps1
 
+# Local prompt/debug captures
+候选结果.txt
+原文本.md
+回复补完候选结果.md
+回复补完原文本.md
+回复补完提示词.md
+格式检查和补全修正原文本.md
+格式检查和补全修正提示词.md
+格式检查和补全修正提示词候选结果.md
+格式检查和补全修正提示词候选结果.txt
+
 # Dependency folders if added locally
 node_modules/
 
