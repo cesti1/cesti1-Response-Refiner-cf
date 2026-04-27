@@ -47,15 +47,16 @@ const DEFAULT_EXTRACT_CHAIN_RULE_PROMPT = [
 
 const DEFAULT_REFINE_SYSTEM_TEMPLATE = "{{basePrompt}}\n\n{{forbiddenInstruction}}";
 const DEFAULT_REFINE_USER_TEMPLATE = "{{textToRefine}}";
-const DEFAULT_FORMAT_REPLACEMENT_SYSTEM_TEMPLATE = "你是严格的格式标签内容修正器。你只输出符合要求的 JSON 对象，不输出解释、完整回复、标签或 Markdown。";
+const DEFAULT_FORMAT_REPLACEMENT_SYSTEM_TEMPLATE = "你是严格的格式标签内容修正器。你只输出符合要求的 JSON 对象，不输出解释、完整回复、标签或 Markdown。JSON 的值只能是目标标签内部纯文本，不得包含任何开始标签、结束标签或模板占位符。";
 const DEFAULT_FORMAT_REPLACEMENT_USER_TEMPLATE = [
     "你是 AI 回复格式检查和补全修正助手。",
     "你只处理非正文标签；正文标签由润色功能处理，禁止输出或修改正文规则对应的内容。",
     "你的任务是修正每个非正文规则对应标签内部的文本，使其满足标签提示词和模板要求。",
     "为了减少输出 token，你绝对不要输出完整回复、开始标签、结束标签、解释或 Markdown 代码块。",
     "你必须只输出一个 JSON 对象，键为规则ID，值为该规则标签内修正后的纯文本。",
-    "如果某个非正文标签不存在但规则要求补全，请仍在对应规则ID里输出应插入的标签内文本。",
-    "脚本会按照格式标签规则顺序重排标签块；若开始标签为“文本开头”，该块必须位于回复最开头。",
+    "JSON 值必须是最终要写入该标签内部的实际内容：不要照搬标签内容模板，不要输出模板占位符，不要包含开始标签或结束标签；文本起点块也不要输出“文本开头”字样和结束标签。",
+    "如果某个非正文标签不存在但规则要求补全，请仍在对应规则ID里输出应插入的标签内文本；如果现有内容已经正确，可原样返回现有标签内内容。",
+    "脚本会按照格式标签规则顺序重排标签块；若开始标签为“文本开头”，该块必须位于回复最开头并由脚本补上结束标签。",
     "格式标签规则：",
     "{{formatRules}}",
     "当前标签内内容：",
@@ -76,7 +77,9 @@ const DEFAULT_COMPLETION_SYSTEM_TEMPLATE = [
     "你是 AI 回复补完助手。当前 AI 回复可能被截断或缺少部分标签。",
     "补完依据：需要补完回复的上一条用户消息始终是主上下文；如果提供思维链，则结合思维链和上一条用户消息；没有思维链时只依靠上一条用户消息。",
     "{{completionRequirement}}",
-    "只输出需要追加到当前回复末尾的内容，不要重复已经存在的完整内容，不要输出说明、标题、分析或 Markdown 代码块。",
+    "只输出需要追加到当前回复末尾的缺失或续写片段，不要重复已经存在的完整内容，不要输出说明、标题、分析或 Markdown 代码块。",
+    "如果需要补全缺失标签，必须生成该标签的实际内容；禁止照搬标签内容模板、示例占位符或 [时间]/[地点]/[选项内容] 这类占位符。",
+    "如果当前回复已经包含完整思维链结束标签，不要再次输出 </think> 或思维链模板；只有当前最后位置确实处在思维链内部时才补完思维链结束标签。",
     "{{completionPrompt}}",
     "全部格式标签规则：",
     "{{formatRules}}",
@@ -263,6 +266,7 @@ function getSettings() {
     const settings = root[SETTINGS_KEY];
     migrateLegacySettings(settings);
     mergeDefaults(settings, DEFAULT_SETTINGS);
+    migratePromptTemplates(settings);
     settings.version = VERSION;
     return settings;
 }
@@ -293,6 +297,23 @@ function migrateLegacySettings(settings) {
 
     if (settings.completionChainRegex === undefined && settings.completionOutlineRegex !== undefined) {
         settings.completionChainRegex = settings.completionOutlineRegex || "";
+    }
+}
+
+function migratePromptTemplates(settings) {
+    const formatSystem = String(settings.formatReplacementSystemTemplate || "");
+    if (!formatSystem.includes("JSON 的值只能是目标标签内部纯文本")) {
+        settings.formatReplacementSystemTemplate = DEFAULT_FORMAT_REPLACEMENT_SYSTEM_TEMPLATE;
+    }
+
+    const formatUser = String(settings.formatReplacementUserTemplate || "");
+    if (!formatUser.includes("JSON 值必须是最终要写入该标签内部的实际内容")) {
+        settings.formatReplacementUserTemplate = DEFAULT_FORMAT_REPLACEMENT_USER_TEMPLATE;
+    }
+
+    const completionSystem = String(settings.completionSystemTemplate || "");
+    if (!completionSystem.includes("禁止照搬标签内容模板") || !completionSystem.includes("不要再次输出 </think>")) {
+        settings.completionSystemTemplate = DEFAULT_COMPLETION_SYSTEM_TEMPLATE;
     }
 }
 
@@ -492,13 +513,12 @@ function normalizeRegexFlags(flags, defaultFlags = "g") {
 
 function unescapeHtmlEntities(text) {
     return String(text || "")
-        .replace(/</g, "<")
-        .replace(/>/g, ">")
-        .replace(/"/g, '"')
-        .replace(/'/g, "'")
-        .replace(/&/g, "&");
+        .replace(/&lt;/g, "<")
+        .replace(/&gt;/g, ">")
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'")
+        .replace(/&amp;/g, "&");
 }
-
 function normalizeRegexBody(body) {
     return String(body || "")
         .replace(/\\\\([sSdDwWbB])/g, "\\$1")
@@ -639,11 +659,15 @@ function ensureBodyRule(settings, notify = false) {
 }
 
 function isStartAnchoredRule(rule) {
-    return String(rule?.startTag || "") === START_OF_TEXT_TAG || Boolean(rule?.startAnchored);
+    const start = String(rule?.startTag || "");
+    const realStart = String(rule?.realStartTag || "");
+    return start === START_OF_TEXT_TAG || start === START_OF_TEXT_LABEL || realStart === START_OF_TEXT_TAG || Boolean(rule?.startAnchored || rule?.forceTop);
 }
 
 function isStartOnlyAnchoredRule(rule) {
-    return isStartAnchoredRule(rule) && (!rule?.realStartTag || String(rule.realStartTag || "") === START_OF_TEXT_TAG);
+    const realStart = String(rule?.realStartTag || "");
+    const start = String(rule?.startTag || "");
+    return isStartAnchoredRule(rule) && (!realStart || realStart === START_OF_TEXT_TAG || realStart === START_OF_TEXT_LABEL || start === START_OF_TEXT_TAG || start === START_OF_TEXT_LABEL);
 }
 
 function getRuleStartLabel(rule) {
@@ -696,7 +720,7 @@ function findRuleMatchesOutsideOccupied(source, rule, occupiedRanges) {
     if (!end) return [];
 
     const matches = [];
-    if (isStartAnchoredRule(rule) && (!rule.realStartTag || rule.realStartTag === START_OF_TEXT_TAG)) {
+    if (isStartOnlyAnchoredRule(rule)) {
         const endIndex = source.indexOf(end);
         if (endIndex >= 0) {
             const blockEnd = endIndex + end.length;
@@ -782,6 +806,10 @@ function buildFormatReplacementValues(sourceText, settings) {
         formatRules: buildFormatRulesTextForRules(rules),
         currentSegmentsJson: JSON.stringify(Object.fromEntries(segments.map(item => [item.key, item.content])), null, 2),
     };
+}
+
+function formatMessagesForStatus(messages) {
+    return messages.map((message, index) => `### ${index + 1}. ${message.role}\n${message.content}`).join("\n\n---\n\n");
 }
 
 function buildRefineMessages(sourceText, settings, isUser) {
@@ -1226,9 +1254,11 @@ async function testConnection() {
     }
 }
 
-async function runRefine(originalText, settings, isUser, signal, onToken = null) {
+async function runRefine(originalText, settings, isUser, signal, onToken = null, onStatus = null) {
     const textToRefine = isUser ? originalText : extractTextToRefine(originalText, settings);
-    const refinedText = await callAI(buildRefineMessages(textToRefine, settings, isUser), { signal, stream: settings.streamStatusEnabled, onToken });
+    const messages = buildRefineMessages(textToRefine, settings, isUser);
+    onStatus?.(`完整的实际发送提示词：\n${formatMessagesForStatus(messages)}\n`);
+    const refinedText = await callAI(messages, { signal, stream: settings.streamStatusEnabled, onToken });
     const finalText = isUser ? refinedText : replaceRefinedText(originalText, refinedText, settings);
     return {
         stage: "refine",
@@ -1251,10 +1281,26 @@ function parseFormatReplacementOutput(text) {
     }
 }
 
+function normalizeReplacementContent(rule, replacement) {
+    const end = String(rule.endTag || "");
+    const actualStart = isStartAnchoredRule(rule) ? String(rule.realStartTag || "") : String(rule.startTag || "");
+    let value = String(replacement ?? "").trim();
+    if (isStartAnchoredRule(rule)) {
+        value = value.replace(new RegExp(`^\\s*${escapeRegExp(START_OF_TEXT_LABEL)}\\s*`, "i"), "").trim();
+    }
+    if (actualStart && actualStart !== START_OF_TEXT_TAG) {
+        value = value.replace(new RegExp(`^\\s*${escapeRegExp(actualStart)}\\s*`), "").trim();
+    }
+    if (end) {
+        value = value.replace(new RegExp(`\\s*${escapeRegExp(end)}\\s*$`), "").trim();
+    }
+    return value;
+}
+
 function replaceTaggedSegmentContent(sourceText, rule, replacement) {
     const start = String(rule.startTag || "");
     const end = String(rule.endTag || "");
-    const value = String(replacement ?? "").trim();
+    const value = normalizeReplacementContent(rule, replacement);
     if (!end || !value || (!start && !isStartAnchoredRule(rule))) {
         return sourceText;
     }
@@ -1341,9 +1387,11 @@ function getMissingFormatRules(sourceText, settings) {
     });
 }
 
-async function runFormat(sourceText, settings, signal, replacementOnly = true, onToken = null) {
+async function runFormat(sourceText, settings, signal, replacementOnly = true, onToken = null, onStatus = null) {
     if (!replacementOnly) {
-        const formattedText = await callAI(buildFormatMessages(sourceText, settings), { signal, stream: settings.streamStatusEnabled, onToken });
+        const messages = buildFormatMessages(sourceText, settings);
+        onStatus?.(`完整的实际发送提示词：\n${formatMessagesForStatus(messages)}\n`);
+        const formattedText = await callAI(messages, { signal, stream: settings.streamStatusEnabled, onToken });
         return {
             stage: "format",
             original_text: sourceText,
@@ -1361,7 +1409,10 @@ async function runFormat(sourceText, settings, signal, replacementOnly = true, o
             candidate_text: sourceText,
         };
     }
-    const replacementText = await callAI(buildFormatMessages(sourceText, settings, true), { signal, stream: settings.streamStatusEnabled, onToken });
+    const messages = buildFormatMessages(sourceText, settings, true);
+    onStatus?.(`完整的实际发送提示词：\n${formatMessagesForStatus(messages)}\n`);
+    onToken = onToken || null;
+    const replacementText = await callAI(messages, { signal, stream: settings.streamStatusEnabled, onToken });
     const replacements = parseFormatReplacementOutput(replacementText);
     const formattedText = applyFormatReplacements(sourceText, settings, replacements, rules);
     return {
@@ -1373,15 +1424,8 @@ async function runFormat(sourceText, settings, signal, replacementOnly = true, o
 }
 
 function appendTemplateForMissingRules(sourceText, rules) {
-    let result = sourceText;
-    const stillMissing = getMissingFormatRules(result, { ...getSettings(), formatRules: rules });
-    for (const rule of stillMissing) {
-        const template = String(rule.template || `${rule.startTag}\n\n${rule.endTag}`).trim();
-        if (template) {
-            result += `${result.endsWith("\n") ? "" : "\n"}${template}\n`;
-        }
-    }
-    return result;
+    // 不再追加模板占位符。缺失标签应由模型生成实际内容；脚本只负责必要的正文闭合兜底，避免候选结果出现 [时间]/[选项内容] 等模板文本。
+    return sourceText;
 }
 
 function finalizeCompletionText(sourceText, continuation, settings, plan) {
@@ -1400,11 +1444,13 @@ async function runCompletion(sourceText, settings, messageId, signal, onToken = 
     onStatus?.(plan.isBodyUnclosed
         ? "检测到正文标签未闭合：将要求模型先从截断处续写正文，再由脚本兜底闭合正文标签。\n"
         : "未检测到正文标签未闭合：按缺失标签/截断位置补完。\n");
-    const continuation = await callAI(buildCompletionMessages(sourceText, settings, messageId, plan.missingRules), { signal, stream: settings.streamStatusEnabled, onToken });
+    const messages = buildCompletionMessages(sourceText, settings, messageId, plan.missingRules);
+    onStatus?.(`完整的实际发送提示词：\n${formatMessagesForStatus(messages)}\n`);
+    const continuation = await callAI(messages, { signal, stream: settings.streamStatusEnabled, onToken });
     onStatus?.(`模型返回补完片段，长度 ${String(continuation || "").length} 字符。\n`);
     const formatted = finalizeCompletionText(sourceText, continuation, settings, plan);
     if (formatted !== sourceText + continuation) {
-        onStatus?.("脚本已执行补完兜底：闭合正文标签或追加后续缺失标签模板。\n");
+        onStatus?.("脚本已执行补完兜底：闭合未闭合的正文标签。\n");
     }
     return {
         stage: "completion",
@@ -1476,7 +1522,7 @@ async function runSelectedPipeline(fullOriginalText, settings, isUser, messageId
     const stageResults = [];
     if (isUser) {
         if (settings.features.refineEnabled) {
-            const result = await runStageWithStatus(messageId, "功能1 润色", onToken => runRefine(workingText, settings, true, signal, onToken));
+            const result = await runStageWithStatus(messageId, "功能1 润色", (onToken, onStatus) => runRefine(workingText, settings, true, signal, onToken, onStatus));
             stageResults.push(result);
             workingText = result.candidate_text;
         }
@@ -1496,14 +1542,14 @@ async function runSelectedPipeline(fullOriginalText, settings, isUser, messageId
         appendStatus(messageId, "执行已勾选功能", settings.features.completionEnabled ? "跳过回复补完：未检测到缺失标签或正文未闭合。\n" : "跳过回复补完：设置中未启用。\n");
     }
     if (settings.features.formatEnabled) {
-        const result = await runStageWithStatus(messageId, "功能2 格式检查和补全修正", (onToken) => runFormat(workingText, settings, signal, true, onToken));
+        const result = await runStageWithStatus(messageId, "功能2 格式检查和补全修正", (onToken, onStatus) => runFormat(workingText, settings, signal, true, onToken, onStatus));
         stageResults.push(result);
         workingText = result.candidate_text;
     } else {
         appendStatus(messageId, "执行已勾选功能", "跳过格式检查：设置中未启用。\n");
     }
     if (settings.features.refineEnabled) {
-        const result = await runStageWithStatus(messageId, "功能1 润色", (onToken) => runRefine(workingText, settings, false, signal, onToken));
+        const result = await runStageWithStatus(messageId, "功能1 润色", (onToken, onStatus) => runRefine(workingText, settings, false, signal, onToken, onStatus));
         stageResults.push(result);
         workingText = result.candidate_text;
     } else {
@@ -1562,9 +1608,9 @@ async function requestFeature(messageId, feature) {
             for (const stage of stages) {
                 let result;
                 if (stage === "refine") {
-                    result = await runStageWithStatus(resolvedId, "功能1 润色", (onToken) => runRefine(workingText, settings, isUser, controller.signal, onToken));
+                    result = await runStageWithStatus(resolvedId, "功能1 润色", (onToken, onStatus) => runRefine(workingText, settings, isUser, controller.signal, onToken, onStatus));
                 } else if (stage === "format") {
-                    result = await runStageWithStatus(resolvedId, "功能2 格式检查和补全修正", (onToken) => runFormat(workingText, settings, controller.signal, true, onToken));
+                    result = await runStageWithStatus(resolvedId, "功能2 格式检查和补全修正", (onToken, onStatus) => runFormat(workingText, settings, controller.signal, true, onToken, onStatus));
                 } else if (stage === "completion") {
                     result = await runStageWithStatus(resolvedId, "功能3 回复补完", (onToken, onStatus) => runCompletion(workingText, settings, resolvedId, controller.signal, onToken, getMissingFormatRules(workingText, settings), onStatus));
                 } else {
