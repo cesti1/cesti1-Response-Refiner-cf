@@ -47,9 +47,8 @@ const DEFAULT_EXTRACT_CHAIN_RULE_PROMPT = [
 
 const DEFAULT_REFINE_SYSTEM_TEMPLATE = "{{basePrompt}}\n\n{{forbiddenInstruction}}";
 const DEFAULT_REFINE_USER_TEMPLATE = "{{textToRefine}}";
-const DEFAULT_FORMAT_REPLACEMENT_SYSTEM_TEMPLATE = "你是严格的格式标签内容修正器。你只输出符合要求的 JSON 对象，不输出解释、完整回复、标签或 Markdown。JSON 的值只能是目标标签内部纯文本，不得包含任何开始标签、结束标签或模板占位符。";
-const DEFAULT_FORMAT_REPLACEMENT_USER_TEMPLATE = [
-    "你是 AI 回复格式检查和补全修正助手。",
+const DEFAULT_FORMAT_REPLACEMENT_SYSTEM_TEMPLATE = [
+    "你是 AI 回复格式检查和补全修正助手，也是严格的格式标签内容修正器。",
     "你只处理非正文标签；正文标签由润色功能处理，禁止输出或修改正文规则对应的内容。",
     "你的任务是修正每个非正文规则对应标签内部的文本，使其满足标签提示词和模板要求。",
     "为了减少输出 token，你绝对不要输出完整回复、开始标签、结束标签、解释或 Markdown 代码块。",
@@ -57,6 +56,8 @@ const DEFAULT_FORMAT_REPLACEMENT_USER_TEMPLATE = [
     "JSON 值必须是最终要写入该标签内部的实际内容：不要照搬标签内容模板，不要输出模板占位符，不要包含开始标签或结束标签；文本起点块也不要输出“文本开头”字样和结束标签。",
     "如果某个非正文标签不存在但规则要求补全，请仍在对应规则ID里输出应插入的标签内文本；如果现有内容已经正确，可原样返回现有标签内内容。",
     "脚本会按照格式标签规则顺序重排标签块；若开始标签为“文本开头”，该块必须位于回复最开头并由脚本补上结束标签。",
+].join("\n");
+const DEFAULT_FORMAT_REPLACEMENT_USER_TEMPLATE = [
     "格式标签规则：",
     "{{formatRules}}",
     "当前标签内内容：",
@@ -301,13 +302,13 @@ function migrateLegacySettings(settings) {
 }
 
 function migratePromptTemplates(settings) {
-    settings.refineSystemTemplate = DEFAULT_REFINE_SYSTEM_TEMPLATE;
-    settings.formatReplacementSystemTemplate = DEFAULT_FORMAT_REPLACEMENT_SYSTEM_TEMPLATE;
-    settings.formatFullSystemTemplate = DEFAULT_FORMAT_FULL_SYSTEM_TEMPLATE;
-    settings.completionSystemTemplate = DEFAULT_COMPLETION_SYSTEM_TEMPLATE;
+    settings.refineSystemTemplate = String(settings.refineSystemTemplate || "").trim() || DEFAULT_REFINE_SYSTEM_TEMPLATE;
+    settings.formatReplacementSystemTemplate = String(settings.formatReplacementSystemTemplate || "").trim() || DEFAULT_FORMAT_REPLACEMENT_SYSTEM_TEMPLATE;
+    settings.formatFullSystemTemplate = String(settings.formatFullSystemTemplate || "").trim() || DEFAULT_FORMAT_FULL_SYSTEM_TEMPLATE;
+    settings.completionSystemTemplate = String(settings.completionSystemTemplate || "").trim() || DEFAULT_COMPLETION_SYSTEM_TEMPLATE;
 
     const formatUser = String(settings.formatReplacementUserTemplate || "");
-    if (!formatUser.includes("JSON 值必须是最终要写入该标签内部的实际内容")) {
+    if (formatUser.includes("你是 AI 回复格式检查和补全修正助手。") || formatUser.includes("JSON 值必须是最终要写入该标签内部的实际内容")) {
         settings.formatReplacementUserTemplate = DEFAULT_FORMAT_REPLACEMENT_USER_TEMPLATE;
     }
 }
@@ -809,7 +810,7 @@ function buildRefineMessages(sourceText, settings, isUser) {
     const forbiddenInstruction = buildForbiddenInstruction(settings);
     const values = { basePrompt, forbiddenInstruction, textToRefine: sourceText, sourceText, messageType: isUser ? "user" : "assistant" };
     return [
-        { role: "system", content: compactPromptText(renderTemplate(DEFAULT_REFINE_SYSTEM_TEMPLATE, values)) },
+        { role: "system", content: compactPromptText(renderTemplate(settings.refineSystemTemplate || DEFAULT_REFINE_SYSTEM_TEMPLATE, values)) },
         { role: "user", content: renderTemplate(settings.refineUserTemplate || DEFAULT_REFINE_USER_TEMPLATE, values) },
     ];
 }
@@ -818,14 +819,14 @@ function buildFormatMessages(sourceText, settings, replacementOnly = false) {
     if (replacementOnly) {
         const values = buildFormatReplacementValues(sourceText, settings);
         return [
-            { role: "system", content: compactPromptText(renderTemplate(DEFAULT_FORMAT_REPLACEMENT_SYSTEM_TEMPLATE, values)) },
+            { role: "system", content: compactPromptText(renderTemplate(settings.formatReplacementSystemTemplate || DEFAULT_FORMAT_REPLACEMENT_SYSTEM_TEMPLATE, values)) },
             { role: "user", content: compactPromptText(renderTemplate(settings.formatReplacementUserTemplate || DEFAULT_FORMAT_REPLACEMENT_USER_TEMPLATE, values)) },
         ];
     }
 
     const values = { sourceText, formatRules: buildFormatRulesText(settings) };
     return [
-        { role: "system", content: compactPromptText(renderTemplate(DEFAULT_FORMAT_FULL_SYSTEM_TEMPLATE, values)) },
+        { role: "system", content: compactPromptText(renderTemplate(settings.formatFullSystemTemplate || DEFAULT_FORMAT_FULL_SYSTEM_TEMPLATE, values)) },
         { role: "user", content: renderTemplate(settings.formatFullUserTemplate || DEFAULT_FORMAT_FULL_USER_TEMPLATE, values) },
     ];
 }
@@ -913,7 +914,7 @@ function buildCompletionMessages(sourceText, settings, messageId, missingRules =
     };
 
     return [
-        { role: "system", content: compactPromptText(renderTemplate(DEFAULT_COMPLETION_SYSTEM_TEMPLATE, values)) },
+        { role: "system", content: compactPromptText(renderTemplate(settings.completionSystemTemplate || DEFAULT_COMPLETION_SYSTEM_TEMPLATE, values)) },
         { role: "user", content: compactPromptText(renderTemplate(settings.completionUserTemplate || DEFAULT_COMPLETION_USER_TEMPLATE, values)) },
     ];
 }
@@ -2245,6 +2246,11 @@ function bindSettings() {
         updatePromptPreview();
     });
 
+    $("#response_refiner_refine_system_template").val(settings.refineSystemTemplate || DEFAULT_REFINE_SYSTEM_TEMPLATE).on("input", function () {
+        settings.refineSystemTemplate = String($(this).val()) || DEFAULT_REFINE_SYSTEM_TEMPLATE;
+        saveSettings();
+        updatePromptPreview();
+    });
     $("#response_refiner_prompt").val(settings.prompt).on("input", function () {
         settings.prompt = String($(this).val());
         saveSettings();
@@ -2299,8 +2305,18 @@ function bindSettings() {
         saveSettings();
         updatePromptPreview();
     });
+    $("#response_refiner_completion_system_template").val(settings.completionSystemTemplate || DEFAULT_COMPLETION_SYSTEM_TEMPLATE).on("input", function () {
+        settings.completionSystemTemplate = String($(this).val()) || DEFAULT_COMPLETION_SYSTEM_TEMPLATE;
+        saveSettings();
+        updatePromptPreview();
+    });
     $("#response_refiner_refine_user_template").val(settings.refineUserTemplate || DEFAULT_REFINE_USER_TEMPLATE).on("input", function () {
         settings.refineUserTemplate = String($(this).val()) || DEFAULT_REFINE_USER_TEMPLATE;
+        saveSettings();
+        updatePromptPreview();
+    });
+    $("#response_refiner_format_replacement_system_template").val(settings.formatReplacementSystemTemplate || DEFAULT_FORMAT_REPLACEMENT_SYSTEM_TEMPLATE).on("input", function () {
+        settings.formatReplacementSystemTemplate = String($(this).val()) || DEFAULT_FORMAT_REPLACEMENT_SYSTEM_TEMPLATE;
         saveSettings();
         updatePromptPreview();
     });
@@ -2331,9 +2347,12 @@ function bindSettings() {
             completionUserTemplate: DEFAULT_COMPLETION_USER_TEMPLATE,
         });
         saveSettings();
+        $("#response_refiner_refine_system_template").val(settings.refineSystemTemplate);
         $("#response_refiner_refine_user_template").val(settings.refineUserTemplate);
+        $("#response_refiner_format_replacement_system_template").val(settings.formatReplacementSystemTemplate);
         $("#response_refiner_format_replacement_user_template").val(settings.formatReplacementUserTemplate);
         $("#response_refiner_format_full_user_template").val(settings.formatFullUserTemplate);
+        $("#response_refiner_completion_system_template").val(settings.completionSystemTemplate);
         $("#response_refiner_completion_user_template").val(settings.completionUserTemplate);
         updatePromptPreview();
     });
