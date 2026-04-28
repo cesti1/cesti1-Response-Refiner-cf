@@ -967,17 +967,24 @@ async function callAI(messages, options = {}) {
 }
 
 async function callOpenAICompatible(providerKey, endpoint, model, apiKey, messages, temperature, maxTokens, signal, stream = false, onToken = null) {
+    const payload = {
+        model,
+        messages,
+        temperature,
+        max_tokens: maxTokens,
+        stream,
+    };
+
+    if (providerKey === "deepseek") {
+        payload.reasoning_effort = "max";
+        payload.thinking = { type: "enabled" };
+    }
+
     const response = await fetch(`${endpoint}/chat/completions`, {
         method: "POST",
         headers: getOpenAICompatibleHeaders(providerKey, apiKey),
         signal,
-        body: JSON.stringify({
-            model,
-            messages,
-            temperature,
-            max_tokens: maxTokens,
-            stream,
-        }),
+        body: JSON.stringify(payload),
     });
 
     if (stream && response.ok && response.body) {
@@ -2172,6 +2179,146 @@ function syncFormatRulesFromDom() {
     saveSettings();
 }
 
+function updateBasicSettingsInputs() {
+    const settings = getSettings();
+    $("#response_refiner_connection_type").val(getProviderKey());
+    updateConnectionTypeUI();
+    $("#response_refiner_refine_enabled").prop("checked", settings.features.refineEnabled);
+    $("#response_refiner_format_enabled").prop("checked", settings.features.formatEnabled);
+    $("#response_refiner_completion_enabled").prop("checked", settings.features.completionEnabled);
+    $("#response_refiner_refine_system_template").val(settings.refineSystemTemplate || DEFAULT_REFINE_SYSTEM_TEMPLATE);
+    $("#response_refiner_prompt").val(settings.prompt);
+    $("#response_refiner_user_prompt").val(settings.userPrompt);
+    $("#response_refiner_forbidden_phrases").val(settings.forbiddenPhrases);
+    $("#response_refiner_filter_enabled").prop("checked", settings.filterEnabled);
+    $("#response_refiner_filter_regex").val(settings.filterRegex);
+    $("#response_refiner_format_replacement_system_template").val(settings.formatReplacementSystemTemplate || DEFAULT_FORMAT_REPLACEMENT_SYSTEM_TEMPLATE);
+    $("#response_refiner_completion_chain_regex").val(settings.completionChainRegex || settings.completionOutlineRegex || "");
+    $("#response_refiner_completion_prompt").val(settings.completionPrompt);
+    $("#response_refiner_completion_system_template").val(settings.completionSystemTemplate || DEFAULT_COMPLETION_SYSTEM_TEMPLATE);
+    $("#response_refiner_refine_user_template").val(settings.refineUserTemplate || DEFAULT_REFINE_USER_TEMPLATE);
+    $("#response_refiner_format_replacement_user_template").val(settings.formatReplacementUserTemplate || DEFAULT_FORMAT_REPLACEMENT_USER_TEMPLATE);
+    $("#response_refiner_format_full_user_template").val(settings.formatFullUserTemplate || DEFAULT_FORMAT_FULL_USER_TEMPLATE);
+    $("#response_refiner_completion_user_template").val(settings.completionUserTemplate || DEFAULT_COMPLETION_USER_TEMPLATE);
+    $("#response_refiner_temperature").val(settings.temperature);
+    $("#response_refiner_temperature_value").text(Number(settings.temperature).toFixed(2));
+    $("#response_refiner_max_tokens").val(settings.maxTokens);
+    $("#response_refiner_stream_status_enabled").prop("checked", settings.streamStatusEnabled);
+}
+
+function resetConnectionSettings() {
+    const settings = getSettings();
+    settings.connectionType = DEFAULT_SETTINGS.connectionType;
+    settings.providers = deepClone(DEFAULT_PROVIDER_SETTINGS);
+    saveSettings();
+    updateBasicSettingsInputs();
+    toastr.success("已恢复连接设置默认值", "Response Refiner");
+}
+
+function resetRefineSettings() {
+    const settings = getSettings();
+    Object.assign(settings.features, { refineEnabled: DEFAULT_SETTINGS.features.refineEnabled });
+    Object.assign(settings, {
+        prompt: DEFAULT_SETTINGS.prompt,
+        userPrompt: DEFAULT_SETTINGS.userPrompt,
+        forbiddenPhrases: DEFAULT_SETTINGS.forbiddenPhrases,
+        filterRegex: DEFAULT_SETTINGS.filterRegex,
+        filterEnabled: DEFAULT_SETTINGS.filterEnabled,
+        refineSystemTemplate: DEFAULT_REFINE_SYSTEM_TEMPLATE,
+    });
+    ensureBodyRule(settings, false);
+    saveSettings();
+    updateBasicSettingsInputs();
+    renderFormatRules();
+    refreshAllMessageButtons();
+    updatePromptPreview();
+    toastr.success("已恢复功能1默认设置", "Response Refiner");
+}
+
+function resetFormatSettings() {
+    const settings = getSettings();
+    Object.assign(settings.features, { formatEnabled: DEFAULT_SETTINGS.features.formatEnabled });
+    Object.assign(settings, {
+        formatRules: deepClone(DEFAULT_SETTINGS.formatRules),
+        collapsedFormatRules: {},
+        formatReplacementSystemTemplate: DEFAULT_FORMAT_REPLACEMENT_SYSTEM_TEMPLATE,
+        formatFullSystemTemplate: DEFAULT_FORMAT_FULL_SYSTEM_TEMPLATE,
+    });
+    ensureBodyRule(settings, false);
+    saveSettings();
+    updateBasicSettingsInputs();
+    renderFormatRules();
+    refreshAllMessageButtons();
+    updatePromptPreview();
+    toastr.success("已恢复功能2默认设置", "Response Refiner");
+}
+
+function resetCompletionSettings() {
+    const settings = getSettings();
+    Object.assign(settings.features, { completionEnabled: DEFAULT_SETTINGS.features.completionEnabled });
+    Object.assign(settings, {
+        completionChainRegex: DEFAULT_SETTINGS.completionChainRegex,
+        completionOutlineRegex: DEFAULT_SETTINGS.completionOutlineRegex,
+        completionPrompt: DEFAULT_SETTINGS.completionPrompt,
+        completionSystemTemplate: DEFAULT_COMPLETION_SYSTEM_TEMPLATE,
+    });
+    saveSettings();
+    updateBasicSettingsInputs();
+    refreshAllMessageButtons();
+    updatePromptPreview();
+    toastr.success("已恢复功能3默认设置", "Response Refiner");
+}
+
+function resetStructureTemplateSettings() {
+    const settings = getSettings();
+    Object.assign(settings, {
+        refineUserTemplate: DEFAULT_REFINE_USER_TEMPLATE,
+        formatReplacementUserTemplate: DEFAULT_FORMAT_REPLACEMENT_USER_TEMPLATE,
+        formatFullUserTemplate: DEFAULT_FORMAT_FULL_USER_TEMPLATE,
+        completionUserTemplate: DEFAULT_COMPLETION_USER_TEMPLATE,
+    });
+    saveSettings();
+    updateBasicSettingsInputs();
+    updatePromptPreview();
+    toastr.success("已恢复高级结构模板默认值", "Response Refiner");
+}
+
+function resetGenerationSettings() {
+    const settings = getSettings();
+    Object.assign(settings, {
+        temperature: DEFAULT_SETTINGS.temperature,
+        maxTokens: DEFAULT_SETTINGS.maxTokens,
+        streamStatusEnabled: DEFAULT_SETTINGS.streamStatusEnabled,
+    });
+    saveSettings();
+    updateBasicSettingsInputs();
+    toastr.success("已恢复生成参数默认值", "Response Refiner");
+}
+
+function resetPromptPreviewSettings() {
+    $("#response_refiner_prompt_preview_type").val("assistant");
+    $("#response_refiner_prompt_preview_part").val("refine");
+    $("#response_refiner_prompt_preview_source").val("");
+    updatePromptPreview();
+    toastr.success("已恢复提示词预览默认状态", "Response Refiner");
+}
+
+function resetExtractSettings() {
+    const settings = getSettings();
+    Object.assign(settings, {
+        extractRulesPrompt: DEFAULT_EXTRACT_RULES_PROMPT,
+        extractChainRulePrompt: DEFAULT_EXTRACT_CHAIN_RULE_PROMPT,
+    });
+    state.extractedRules = [];
+    saveSettings();
+    populateExtractPromptInputs();
+    $("#response_refiner_extract_source").val("");
+    $("#response_refiner_extract_chain_regex").val("");
+    $("#response_refiner_extract_output").text("暂无提取结果");
+    $("#response_refiner_extract_apply").prop("disabled", true);
+    toastr.success("已恢复自动提取默认设置", "Response Refiner");
+}
+
 function bindSettings() {
     const settings = getSettings();
     renderProviderOptions();
@@ -2335,27 +2482,14 @@ function bindSettings() {
         saveSettings();
         updatePromptPreview();
     });
-    $("#response_refiner_prompt_template_reset").on("click", function () {
-        Object.assign(settings, {
-            refineSystemTemplate: DEFAULT_REFINE_SYSTEM_TEMPLATE,
-            refineUserTemplate: DEFAULT_REFINE_USER_TEMPLATE,
-            formatReplacementSystemTemplate: DEFAULT_FORMAT_REPLACEMENT_SYSTEM_TEMPLATE,
-            formatReplacementUserTemplate: DEFAULT_FORMAT_REPLACEMENT_USER_TEMPLATE,
-            formatFullSystemTemplate: DEFAULT_FORMAT_FULL_SYSTEM_TEMPLATE,
-            formatFullUserTemplate: DEFAULT_FORMAT_FULL_USER_TEMPLATE,
-            completionSystemTemplate: DEFAULT_COMPLETION_SYSTEM_TEMPLATE,
-            completionUserTemplate: DEFAULT_COMPLETION_USER_TEMPLATE,
-        });
-        saveSettings();
-        $("#response_refiner_refine_system_template").val(settings.refineSystemTemplate);
-        $("#response_refiner_refine_user_template").val(settings.refineUserTemplate);
-        $("#response_refiner_format_replacement_system_template").val(settings.formatReplacementSystemTemplate);
-        $("#response_refiner_format_replacement_user_template").val(settings.formatReplacementUserTemplate);
-        $("#response_refiner_format_full_user_template").val(settings.formatFullUserTemplate);
-        $("#response_refiner_completion_system_template").val(settings.completionSystemTemplate);
-        $("#response_refiner_completion_user_template").val(settings.completionUserTemplate);
-        updatePromptPreview();
-    });
+    $("#response_refiner_reset_connection").on("click", resetConnectionSettings);
+    $("#response_refiner_reset_refine").on("click", resetRefineSettings);
+    $("#response_refiner_reset_format").on("click", resetFormatSettings);
+    $("#response_refiner_reset_completion").on("click", resetCompletionSettings);
+    $("#response_refiner_prompt_template_reset").on("click", resetStructureTemplateSettings);
+    $("#response_refiner_reset_generation").on("click", resetGenerationSettings);
+    $("#response_refiner_reset_prompt_preview").on("click", resetPromptPreviewSettings);
+    $("#response_refiner_reset_extract").on("click", resetExtractSettings);
     $("#response_refiner_prompt_preview_type, #response_refiner_prompt_preview_part, #response_refiner_prompt_preview_source").on("input change", updatePromptPreview);
     $("#response_refiner_refresh_prompt_preview").on("click", function () {
         fillPromptPreviewSourceFromLatestAssistant(true);

@@ -11,6 +11,9 @@
                     <i class="fa-solid fa-chevron-down response-refiner-section-icon"></i>
                 </div>
                 <div class="response-refiner-section-body">
+                    <div class="response-refiner-button-row marginBot8">
+                        <button id="response_refiner_reset_connection" type="button" class="menu_button response-refiner-menu-button"><i class="fa-solid fa-rotate-left"></i><span>恢复本栏默认设置</span></button>
+                    </div>
                     <label for="response_refiner_connection_type">连接方式</label>
                     <select id="response_refiner_connection_type" class="text_pole marginBot8"></select>
                     <label id="response_refiner_endpoint_label" for="response_refiner_endpoint">接口地址</label>
@@ -34,6 +37,9 @@
             <div class="response-refiner-section" data-section-id="refine">
                 <div class="response-refiner-section-header" role="button" tabindex="0"><h4>功能1：润色</h4><i class="fa-solid fa-chevron-down response-refiner-section-icon"></i></div>
                 <div class="response-refiner-section-body">
+                    <div class="response-refiner-button-row marginBot8">
+                        <button id="response_refiner_reset_refine" type="button" class="menu_button response-refiner-menu-button"><i class="fa-solid fa-rotate-left"></i><span>恢复本栏默认设置</span></button>
+                    </div>
                     <label class="checkbox_label"><input id="response_refiner_refine_enabled" type="checkbox" /><span>启用功能1：润色</span></label>
                     <label for="response_refiner_refine_system_template">功能1完整 system 提示词</label>
                     <textarea id="response_refiner_refine_system_template" class="text_pole marginBot8" rows="7" placeholder="输入功能1实际发送的完整 system 提示词，可使用 {{basePrompt}}、{{forbiddenInstruction}}"></textarea>
@@ -54,6 +60,9 @@
             <div class="response-refiner-section" data-section-id="format">
                 <div class="response-refiner-section-header" role="button" tabindex="0"><h4>功能2：格式检查和补全修正</h4><i class="fa-solid fa-chevron-down response-refiner-section-icon"></i></div>
                 <div class="response-refiner-section-body">
+                    <div class="response-refiner-button-row marginBot8">
+                        <button id="response_refiner_reset_format" type="button" class="menu_button response-refiner-menu-button"><i class="fa-solid fa-rotate-left"></i><span>恢复本栏默认设置</span></button>
+                    </div>
                     <label class="checkbox_label"><input id="response_refiner_format_enabled" type="checkbox" /><span>启用功能2：格式检查和补全修正（仅 AI 回复）</span></label>
                     <div class="response-refiner-note marginBot8">必须保留一条“正文”规则，正文规则标签与润色捕获正则一致且不由本功能修正。本功能只处理其他标签，生成结果只回填对应标签内部，不改动标签外文本。</div>
                     <label for="response_refiner_format_replacement_system_template">功能2完整 system 提示词</label>
@@ -70,6 +79,9 @@
             <div class="response-refiner-section" data-section-id="completion">
                 <div class="response-refiner-section-header" role="button" tabindex="0"><h4>功能3：回复补完</h4><i class="fa-solid fa-chevron-down response-refiner-section-icon"></i></div>
                 <div class="response-refiner-section-body">
+                    <div class="response-refiner-button-row marginBot8">
+                        <button id="response_refiner_reset_completion" type="button" class="menu_button response-refiner-menu-button"><i class="fa-solid fa-rotate-left"></i><span>恢复本栏默认设置</span></button>
+                    </div>
                     <label class="checkbox_label"><input id="response_refiner_completion_enabled" type="checkbox" /><span>启用功能3：回复补完（仅 AI 回复，配合格式规则）</span></label>
                     <label for="response_refiner_completion_chain_regex">思维链捕获正则</label>
                     <input id="response_refiner_completion_chain_regex" class="text_pole marginBot8" type="text" placeholder="例如: <thinking>([\s\S]*?)</thinking>" />
@@ -87,7 +99,7 @@
                 <div class="response-refiner-section-body">
                     <div class="response-refiner-note marginBot8">三个功能的完整 system 提示词已分别移到对应功能栏。这里仅保留可选的 user 消息结构模板，用于调整待处理文本、格式规则、上下文和变量的拼装方式；不要在这里写身份、规则、输出约束等 system 类内容。可用占位符：功能1：{{textToRefine}}、{{sourceText}}、{{messageType}}。功能2：{{formatRules}}、{{currentSegmentsJson}}、{{sourceText}}。功能3：{{previousUserText}}、{{chainContext}}、{{unclosedInfo}}、{{missingRules}}、{{formatRules}}、{{completionPrompt}}、{{completionRequirement}}、{{completionUserInstruction}}、{{sourceText}}。</div>
                     <div class="response-refiner-button-row marginBot8">
-                        <button id="response_refiner_prompt_template_reset" type="button" class="menu_button response-refiner-menu-button"><i class="fa-solid fa-rotate-left"></i><span>恢复默认结构模板</span></button>
+                        <button id="response_refiner_prompt_template_reset" type="button" class="menu_button response-refiner-menu-button"><i class="fa-solid fa-rotate-left"></i><span>恢复本栏默认设置</span></button>
                     </div>
                     <label for="response_refiner_refine_user_template">功能1 user 结构模板：放入实际要润色的文本</label>
                     <textarea id="response_refiner_refine_user_template" class="text_pole marginBot8" rows="3"></textarea>
@@ -103,6 +115,9 @@
             <div class="response-refiner-section" data-section-id="generation">
                 <div class="response-refiner-section-header" role="button" tabindex="0"><h4>生成参数与状态窗口</h4><i class="fa-solid fa-chevron-down response-refiner-section-icon"></i></div>
                 <div class="response-refiner-section-body">
+                    <div class="response-refiner-button-row marginBot8">
+                        <button id="response_refiner_reset_generation" type="button" class="menu_button response-refiner-menu-button"><i class="fa-solid fa-rotate-left"></i><span>恢复本栏默认设置</span></button>
+                    </div>
                     <label for="response_refiner_temperature">Temperature: <span id="response_refiner_temperature_value">0.70</span></label>
                     <input id="response_refiner_temperature" class="marginBot8" type="range" min="0" max="1.5" step="0.05" />
                     <label for="response_refiner_max_tokens">最大输出 Tokens</label>
@@ -115,6 +130,9 @@
             <div class="response-refiner-section" data-section-id="prompt-preview">
                 <div class="response-refiner-section-header" role="button" tabindex="0"><h4>提示词预览</h4><i class="fa-solid fa-chevron-down response-refiner-section-icon"></i></div>
                 <div class="response-refiner-section-body">
+                    <div class="response-refiner-button-row marginBot8">
+                        <button id="response_refiner_reset_prompt_preview" type="button" class="menu_button response-refiner-menu-button"><i class="fa-solid fa-rotate-left"></i><span>恢复本栏默认设置</span></button>
+                    </div>
                     <div class="response-refiner-note marginBot8">这里分四段可切换预览：功能1、功能2、功能3，以及“执行设置中已勾选的功能”的组合管线说明。预览不会发起请求。</div>
                     <label for="response_refiner_prompt_preview_type">消息类型</label>
                     <select id="response_refiner_prompt_preview_type" class="text_pole marginBot8"><option value="assistant">AI 回复</option><option value="user">用户输入</option></select>
@@ -145,6 +163,9 @@
         <div class="response-refiner-modal-header">
             <h3>自动提取格式规则</h3>
             <button id="response_refiner_extract_close" type="button" class="menu_button response-refiner-menu-button"><i class="fa-solid fa-xmark"></i><span>关闭</span></button>
+        </div>
+        <div class="response-refiner-button-row marginBot8">
+            <button id="response_refiner_reset_extract" type="button" class="menu_button response-refiner-menu-button"><i class="fa-solid fa-rotate-left"></i><span>恢复本栏默认设置</span></button>
         </div>
         <div class="response-refiner-note marginBot8">粘贴一段完整回复后，脚本会先提取成对标签，再让 AI 一次性为每个普通标签生成规则名、标签内提示词和模板。若思维链内部包含其他标签块，请填写下方思维链捕获正则；只有填写后才会额外生成思维链规则。</div>
         <label for="response_refiner_extract_source">完整回复样例</label>
