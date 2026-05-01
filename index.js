@@ -3896,7 +3896,9 @@ function refreshAllMessageButtons() {
 }
 
 async function loadSettingsHtml() {
+  const relativeUrl = new URL("./settings.html", import.meta.url).href;
   const urls = [
+    relativeUrl,
     `/scripts/extensions/third-party/${MODULE_NAME}/settings.html`,
     `/scripts/extensions/${MODULE_NAME}/settings.html`,
   ];
@@ -3911,7 +3913,7 @@ async function loadSettingsHtml() {
   }
 
   throw new Error(
-    `无法加载 settings.html，请确认插件目录为 third-party/${MODULE_NAME}`,
+    "无法加载 settings.html，请确认插件目录内存在 settings.html，且插件文件未损坏。",
   );
 }
 
