@@ -313,9 +313,19 @@ function migrateLegacySettings(settings) {
       settings[legacyApiKeyKey] ||
       settings.apiKey ||
       "";
-    settings.connectionType = "direct";
+    if (
+      !settings.connectionType ||
+      settings.connectionType === legacyProviderKey
+    ) {
+      settings.connectionType = "direct";
+    }
   }
   delete settings.providers[legacyProviderKey];
+  delete settings.endpoint;
+  delete settings.model;
+  delete settings.apiKey;
+  delete settings[legacyModelKey];
+  delete settings[legacyApiKeyKey];
 
   if (
     settings.directEndpoint !== undefined ||
@@ -329,6 +339,9 @@ function migrateLegacySettings(settings) {
     settings.providers.direct.apiKey =
       settings.providers.direct.apiKey || settings.directApiKey || "";
   }
+  delete settings.directEndpoint;
+  delete settings.directModel;
+  delete settings.directApiKey;
 
   if (
     settings.openrouterEndpoint !== undefined ||
@@ -347,6 +360,9 @@ function migrateLegacySettings(settings) {
     settings.providers.openrouter.apiKey =
       settings.providers.openrouter.apiKey || settings.openrouterApiKey || "";
   }
+  delete settings.openrouterEndpoint;
+  delete settings.openrouterModel;
+  delete settings.openrouterApiKey;
 
   if (!PROVIDERS[settings.connectionType]) {
     settings.connectionType = "direct";
