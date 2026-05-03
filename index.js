@@ -221,6 +221,7 @@ const DEFAULT_SETTINGS = {
   extractChainRulePrompt: DEFAULT_EXTRACT_CHAIN_RULE_PROMPT,
   completionContextMessages: 0,
   streamStatusEnabled: false,
+  apiConsoleLogEnabled: false,
   uiCollapsedSections: {},
   collapsedFormatRules: {},
 };
@@ -1359,6 +1360,60 @@ async function callAI(messages, options = {}) {
   );
 }
 
+function isApiConsoleLogEnabled() {
+  return Boolean(getSettings().apiConsoleLogEnabled);
+}
+
+function maskApiKey(apiKey) {
+  const value = String(apiKey || "");
+  if (!value) return "";
+  if (value.length <= 8) return `${value.slice(0, 2)}***${value.slice(-2)}`;
+  return `${value.slice(0, 4)}***${value.slice(-4)}`;
+}
+
+function createResponsePreview(data) {
+  if (typeof data === "string") {
+    return data.length > 1000 ? `${data.slice(0, 1000)}…` : data;
+  }
+
+  try {
+    const json = JSON.stringify(data, null, 2);
+    return json.length > 4000 ? `${json.slice(0, 4000)}…` : data;
+  } catch (_error) {
+    return data;
+  }
+}
+
+function logApiRequest(providerKey, request) {
+  if (!isApiConsoleLogEnabled()) return;
+  console.groupCollapsed(
+    `[Response Refiner][API 请求][${providerKey}] ${request.url}`,
+  );
+  console.log("请求配置", request);
+  console.groupEnd();
+}
+
+function logApiResponse(providerKey, response, data, extra = {}) {
+  if (!isApiConsoleLogEnabled()) return;
+  console.groupCollapsed(
+    `[Response Refiner][API 响应][${providerKey}] ${response.status} ${response.url || extra.url || ""}`,
+  );
+  console.log("响应信息", {
+    ok: response.ok,
+    status: response.status,
+    statusText: response.statusText,
+    url: response.url || extra.url || "",
+    ...extra,
+  });
+  console.log("响应内容", createResponsePreview(data));
+  console.groupEnd();
+}
+
+function logApiStreamChunk(providerKey, chunk) {
+  if (!isApiConsoleLogEnabled() || !chunk) return;
+  console.log(`[Response Refiner][API 流式片段][${providerKey}]`, chunk);
+}
+
 async function callOpenAICompatible(
   providerKey,
   endpoint,
@@ -1384,18 +1439,33 @@ async function callOpenAICompatible(
     payload.thinking = { type: "enabled" };
   }
 
-  const response = await fetch(`${endpoint}/chat/completions`, {
+  const url = `${endpoint}/chat/completions`;
+  const headers = getOpenAICompatibleHeaders(providerKey, apiKey);
+  logApiRequest(providerKey, {
+    url,
     method: "POST",
-    headers: getOpenAICompatibleHeaders(providerKey, apiKey),
+    headers: {
+      ...headers,
+      Authorization: headers.Authorization
+        ? `Bearer ${maskApiKey(apiKey)}`
+        : undefined,
+    },
+    body: payload,
+  });
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers,
     signal,
     body: JSON.stringify(payload),
   });
 
   if (stream && response.ok && response.body) {
-    return readOpenAIStream(response, onToken);
+    return readOpenAIStream(response, onToken, providerKey);
   }
 
   const data = await safeJson(response);
+  logApiResponse(providerKey, response, data, { url });
   if (!response.ok) {
     throw new Error(
       data?.error?.message || data?.message || `HTTP ${response.status}`,
@@ -1410,7 +1480,11 @@ async function callOpenAICompatible(
   return stripCodeFence(content);
 }
 
-async function readOpenAIStream(response, onToken) {
+async function readOpenAIStream(
+  response,
+  onToken,
+  providerKey = "openai-compatible",
+) {
   const reader = response.body.getReader();
   const decoder = new TextDecoder("utf-8");
   let buffer = "";
@@ -1428,6 +1502,7 @@ async function readOpenAIStream(response, onToken) {
       if (payload === "[DONE]") continue;
       try {
         const data = JSON.parse(payload);
+        logApiStreamChunk(providerKey, data);
         const token =
           data?.choices?.[0]?.delta?.content || data?.choices?.[0]?.text || "";
         if (token) {
@@ -1439,6 +1514,12 @@ async function readOpenAIStream(response, onToken) {
       }
     }
   }
+  logApiResponse(
+    providerKey,
+    response,
+    { streamedText: result },
+    { streamed: true },
+  );
   return stripCodeFence(result);
 }
 
@@ -1460,26 +1541,35 @@ async function callGemini(
     .filter((item) => item.role !== "system")
     .map((item) => item.content)
     .join("\n\n");
-  const response = await fetch(
-    `${endpoint}/${modelName}:generateContent?key=${encodeURIComponent(apiKey)}`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      signal,
-      body: JSON.stringify({
-        systemInstruction: systemText
-          ? { parts: [{ text: systemText }] }
-          : undefined,
-        contents: [{ role: "user", parts: [{ text: userText }] }],
-        generationConfig: {
-          temperature,
-          maxOutputTokens: maxTokens,
-        },
-      }),
+  const url = `${endpoint}/${modelName}:generateContent?key=${encodeURIComponent(apiKey)}`;
+  const payload = {
+    systemInstruction: systemText
+      ? { parts: [{ text: systemText }] }
+      : undefined,
+    contents: [{ role: "user", parts: [{ text: userText }] }],
+    generationConfig: {
+      temperature,
+      maxOutputTokens: maxTokens,
     },
-  );
+  };
+  logApiRequest("gemini", {
+    url,
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: {
+      ...payload,
+      apiKey: maskApiKey(apiKey),
+    },
+  });
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    signal,
+    body: JSON.stringify(payload),
+  });
 
   const data = await safeJson(response);
+  logApiResponse("gemini", response, data, { url });
   if (!response.ok) {
     throw new Error(
       data?.error?.message || data?.message || `HTTP ${response.status}`,
@@ -1513,7 +1603,25 @@ async function callClaude(
     .filter((item) => item.role !== "system")
     .map((item) => item.content)
     .join("\n\n");
-  const response = await fetch(`${endpoint}/v1/messages`, {
+  const url = `${endpoint}/v1/messages`;
+  const payload = {
+    model,
+    max_tokens: maxTokens,
+    temperature,
+    system,
+    messages: [{ role: "user", content: user }],
+  };
+  logApiRequest("claude", {
+    url,
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": maskApiKey(apiKey),
+      "anthropic-version": "2023-06-01",
+    },
+    body: payload,
+  });
+  const response = await fetch(url, {
     method: "POST",
     signal,
     headers: {
@@ -1521,16 +1629,11 @@ async function callClaude(
       "x-api-key": apiKey,
       "anthropic-version": "2023-06-01",
     },
-    body: JSON.stringify({
-      model,
-      max_tokens: maxTokens,
-      temperature,
-      system,
-      messages: [{ role: "user", content: user }],
-    }),
+    body: JSON.stringify(payload),
   });
 
   const data = await safeJson(response);
+  logApiResponse("claude", response, data, { url });
   if (!response.ok) {
     throw new Error(
       data?.error?.message || data?.message || `HTTP ${response.status}`,
@@ -1592,23 +1695,73 @@ async function fetchProviderModels(providerKey = getProviderKey()) {
 
   let response;
   if (provider.modelFetch === "gemini") {
-    response = await fetch(
-      `${endpoint}/models?key=${encodeURIComponent(apiKey)}`,
+    const url = `${endpoint}/models?key=${encodeURIComponent(apiKey)}`;
+    logApiRequest(providerKey, {
+      url,
+      method: "GET",
+      headers: {},
+      query: { apiKey: maskApiKey(apiKey) },
+      purpose: "fetch-models",
+    });
+    response = await fetch(url);
+    const data = await safeJson(response);
+    logApiResponse(providerKey, response, data, {
+      url,
+      purpose: "fetch-models",
+    });
+    if (!response.ok) {
+      throw new Error(
+        data?.error?.message || data?.message || `HTTP ${response.status}`,
+      );
+    }
+    return normalizeModelList(data, providerKey).sort((a, b) =>
+      String(a.name).localeCompare(String(b.name)),
     );
   } else if (provider.modelFetch === "claude") {
-    response = await fetch(`${endpoint}/v1/models`, {
+    const url = `${endpoint}/v1/models`;
+    const headers = {
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+    };
+    logApiRequest(providerKey, {
+      url,
+      method: "GET",
+      headers: {
+        "x-api-key": maskApiKey(apiKey),
+        "anthropic-version": "2023-06-01",
+      },
+      purpose: "fetch-models",
+    });
+    response = await fetch(url, {
       headers: {
         "x-api-key": apiKey,
         "anthropic-version": "2023-06-01",
       },
     });
   } else {
-    response = await fetch(`${endpoint}/models`, {
-      headers: getOpenAICompatibleHeaders(providerKey, apiKey),
+    const url = `${endpoint}/models`;
+    const headers = getOpenAICompatibleHeaders(providerKey, apiKey);
+    logApiRequest(providerKey, {
+      url,
+      method: "GET",
+      headers: {
+        ...headers,
+        Authorization: headers.Authorization
+          ? `Bearer ${maskApiKey(apiKey)}`
+          : undefined,
+      },
+      purpose: "fetch-models",
+    });
+    response = await fetch(url, {
+      headers,
     });
   }
 
   const data = await safeJson(response);
+  logApiResponse(providerKey, response, data, {
+    url: response.url || "",
+    purpose: "fetch-models",
+  });
   if (!response.ok) {
     throw new Error(
       data?.error?.message || data?.message || `HTTP ${response.status}`,
@@ -3495,6 +3648,10 @@ function updateBasicSettingsInputs() {
     "checked",
     settings.streamStatusEnabled,
   );
+  $("#response_refiner_api_console_log_enabled").prop(
+    "checked",
+    settings.apiConsoleLogEnabled,
+  );
 }
 
 function resetConnectionSettings() {
@@ -3586,6 +3743,7 @@ function resetGenerationSettings() {
     temperature: DEFAULT_SETTINGS.temperature,
     maxTokens: DEFAULT_SETTINGS.maxTokens,
     streamStatusEnabled: DEFAULT_SETTINGS.streamStatusEnabled,
+    apiConsoleLogEnabled: DEFAULT_SETTINGS.apiConsoleLogEnabled,
   });
   saveSettings();
   updateBasicSettingsInputs();
@@ -3796,6 +3954,12 @@ function bindSettings() {
     .prop("checked", settings.streamStatusEnabled)
     .on("change", function () {
       settings.streamStatusEnabled = $(this).prop("checked");
+      saveSettings();
+    });
+  $("#response_refiner_api_console_log_enabled")
+    .prop("checked", settings.apiConsoleLogEnabled)
+    .on("change", function () {
+      settings.apiConsoleLogEnabled = $(this).prop("checked");
       saveSettings();
     });
 
