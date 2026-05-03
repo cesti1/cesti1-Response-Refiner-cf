@@ -379,30 +379,12 @@ function migratePromptTemplates(settings) {
     String(settings.completionUserTemplate || "") ||
     DEFAULT_COMPLETION_USER_TEMPLATE;
 
-  const formatUser = String(settings.formatReplacementUserTemplate || "");
-  if (
-    formatUser.includes("你是 AI 回复格式检查和补全修正助手。") ||
-    formatUser.includes("JSON 值必须是最终要写入该标签内部的实际内容") ||
-    !formatUser.includes("需要判断、检查、补完的格式标签规则")
-  ) {
-    settings.formatReplacementUserTemplate =
-      DEFAULT_FORMAT_REPLACEMENT_USER_TEMPLATE;
-  }
-
   const completionSystem = String(settings.completionSystemTemplate || "");
   if (
     completionSystem.includes("全部格式标签规则：") ||
     completionSystem.includes("补完依据：需要补完回复的上一条用户消息")
   ) {
     settings.completionSystemTemplate = DEFAULT_COMPLETION_SYSTEM_TEMPLATE;
-  }
-
-  const completionUser = String(settings.completionUserTemplate || "");
-  if (
-    !completionUser.includes("全部格式标签规则") ||
-    !completionUser.includes("最后约束：只输出需要追加到当前回复末尾的内容")
-  ) {
-    settings.completionUserTemplate = DEFAULT_COMPLETION_USER_TEMPLATE;
   }
 }
 
