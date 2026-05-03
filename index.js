@@ -1674,7 +1674,7 @@ function getActiveProviderKeyFromUi() {
 }
 
 async function refreshProviderModels() {
-  const providerKey = getProviderKey();
+  const providerKey = getActiveProviderKeyFromUi();
   const providerSettings = getProviderSettings(providerKey);
   const $button = $("#response_refiner_refresh_models");
   $button.prop("disabled", true).find("i").addClass("fa-spin");
