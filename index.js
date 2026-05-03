@@ -272,10 +272,16 @@ function getSettings() {
 }
 
 function migrateLegacySettings(settings) {
-  settings.providers =
-    settings.providers || deepClone(DEFAULT_PROVIDER_SETTINGS);
-  settings.providers.direct =
-    settings.providers.direct || deepClone(DEFAULT_PROVIDER_SETTINGS.direct);
+  settings.providers = settings.providers || {};
+  for (const providerKey of Object.keys(PROVIDERS)) {
+    settings.providers[providerKey] =
+      settings.providers[providerKey] ||
+      deepClone(DEFAULT_PROVIDER_SETTINGS[providerKey]);
+    mergeDefaults(
+      settings.providers[providerKey],
+      DEFAULT_PROVIDER_SETTINGS[providerKey],
+    );
+  }
 
   const legacyProviderKey = "cloud" + "flare";
   const legacyModelKey = legacyProviderKey + "Model";
@@ -433,6 +439,25 @@ function getProviderSettings(providerKey = getProviderKey()) {
     DEFAULT_PROVIDER_SETTINGS[providerKey],
   );
   return settings.providers[providerKey];
+}
+
+function populateConnectionInputs(providerKey = getProviderKey()) {
+  const provider = PROVIDERS[providerKey];
+  const providerSettings = getProviderSettings(providerKey);
+  const endpointValue = normalizeEndpoint(providerSettings.endpoint);
+  const displayEndpoint =
+    endpointValue ||
+    (providerKey === "direct"
+      ? ""
+      : normalizeEndpoint(provider.defaultEndpoint || ""));
+
+  setText($("#response_refiner_endpoint_label"), provider.endpointLabel);
+  $("#response_refiner_endpoint")
+    .attr("placeholder", provider.endpointPlaceholder)
+    .val(displayEndpoint);
+  $("#response_refiner_api_key_input").val(providerSettings.apiKey || "");
+  $("#response_refiner_model_manual").val(providerSettings.model || "");
+  updateModelSelect(providerKey);
 }
 
 function normalizeEndpoint(endpoint) {
@@ -1663,22 +1688,7 @@ async function refreshProviderModels() {
 
 function updateConnectionTypeUI() {
   const providerKey = getProviderKey();
-  const provider = PROVIDERS[providerKey];
-  const providerSettings = getProviderSettings(providerKey);
-  const endpointValue = normalizeEndpoint(providerSettings.endpoint);
-  const displayEndpoint =
-    endpointValue ||
-    (providerKey === "direct"
-      ? ""
-      : normalizeEndpoint(provider.defaultEndpoint || ""));
-
-  setText($("#response_refiner_endpoint_label"), provider.endpointLabel);
-  $("#response_refiner_endpoint")
-    .attr("placeholder", provider.endpointPlaceholder)
-    .val(displayEndpoint);
-  $("#response_refiner_api_key_input").val(providerSettings.apiKey || "");
-  $("#response_refiner_model_manual").val(providerSettings.model || "");
-  updateModelSelect(providerKey);
+  populateConnectionInputs(providerKey);
 }
 
 async function testConnection() {
@@ -3621,7 +3631,7 @@ function bindSettings() {
     .on("change", function () {
       settings.connectionType = String($(this).val());
       saveSettings();
-      updateConnectionTypeUI();
+      populateConnectionInputs(settings.connectionType);
     });
 
   $("#response_refiner_endpoint").on("input", function () {
