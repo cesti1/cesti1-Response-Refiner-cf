@@ -803,7 +803,7 @@ ${inferred.endTag}`,
     settings.formatRules.unshift(rule);
   }
   rule.id = rule.id || "content";
-  rule.enabled = true;
+  if (rule.enabled === undefined) rule.enabled = true;
   rule.name = "正文";
   rule.startTag = inferred.startTag;
   rule.endTag = inferred.endTag;
@@ -2339,7 +2339,7 @@ async function requestFeature(messageId, feature) {
                 workingText,
                 settings,
                 controller.signal,
-                true,
+                false,
                 onToken,
                 onStatus,
               ),
@@ -3150,10 +3150,16 @@ function buildPromptPreviewBlocks(sourceText, isUser) {
     ),
     format: isUser
       ? "## 功能2 格式检查和补全修正\n用户输入不执行格式检查。"
-      : formatPromptMessagesForPreview(
-          "功能2 格式检查和补全修正（仅非正文标签，返回替换 JSON）",
-          buildFormatMessages(source, settings, true),
-        ),
+      : [
+          formatPromptMessagesForPreview(
+            "功能2 格式检查和补全修正（当前默认执行模式：仅非正文标签，返回替换 JSON）",
+            buildFormatMessages(source, settings, true),
+          ),
+          formatPromptMessagesForPreview(
+            "功能2 完整回复模式（点击单独的格式检查按钮时使用）",
+            buildFormatMessages(source, settings, false),
+          ),
+        ].join("\n\n---\n\n"),
     completion: isUser
       ? "## 功能3 回复补完\n用户输入不执行回复补完。"
       : formatPromptMessagesForPreview(
@@ -3432,17 +3438,25 @@ function updateBasicSettingsInputs() {
     settings.completionSystemTemplate || DEFAULT_COMPLETION_SYSTEM_TEMPLATE,
   );
   $("#response_refiner_refine_user_template").val(
-    settings.refineUserTemplate || DEFAULT_REFINE_USER_TEMPLATE,
+    getSettingValue(settings.refineUserTemplate, DEFAULT_REFINE_USER_TEMPLATE),
   );
   $("#response_refiner_format_replacement_user_template").val(
-    settings.formatReplacementUserTemplate ||
+    getSettingValue(
+      settings.formatReplacementUserTemplate,
       DEFAULT_FORMAT_REPLACEMENT_USER_TEMPLATE,
+    ),
   );
   $("#response_refiner_format_full_user_template").val(
-    settings.formatFullUserTemplate || DEFAULT_FORMAT_FULL_USER_TEMPLATE,
+    getSettingValue(
+      settings.formatFullUserTemplate,
+      DEFAULT_FORMAT_FULL_USER_TEMPLATE,
+    ),
   );
   $("#response_refiner_completion_user_template").val(
-    settings.completionUserTemplate || DEFAULT_COMPLETION_USER_TEMPLATE,
+    getSettingValue(
+      settings.completionUserTemplate,
+      DEFAULT_COMPLETION_USER_TEMPLATE,
+    ),
   );
   $("#response_refiner_temperature").val(settings.temperature);
   $("#response_refiner_temperature_value").text(
