@@ -2005,31 +2005,123 @@ function getRuleFullBlock(text, rule) {
   return matches?.length ? matches[matches.length - 1] : "";
 }
 
-function removeRuleBlocks(text, rules) {
-  let result = String(text || "");
-  for (const rule of rules) {
-    const start = String(rule.startTag || "");
-    const end = String(rule.endTag || "");
-    if (!end || (!start && !isStartAnchoredRule(rule))) continue;
-    const regex = isStartAnchoredRule(rule)
-      ? new RegExp(`^([\\s\\S]*?${escapeRegExp(end)})(?:\\s*)`)
-      : new RegExp(
-          `${escapeRegExp(start)}[\\s\\S]*?${escapeRegExp(end)}\\s*`,
-          "g",
-        );
-    result = result.replace(regex, "");
+function buildRuleBlock(rule, content) {
+  const value = normalizeReplacementContent(rule, content);
+  if (!value || !String(rule?.endTag || "")) return "";
+  if (isStartAnchoredRule(rule)) {
+    return `${value}${value.endsWith("\n") ? "" : "\n"}${rule.endTag}`;
   }
-  return result.trim();
+  const start = String(rule?.startTag || "");
+  if (!start) return "";
+  return `${start}${value.startsWith("\n") ? "" : "\n"}${value}${value.endsWith("\n") ? "" : "\n"}${rule.endTag}`;
 }
 
-function reorderFormatBlocks(sourceText, rules) {
+function collectRuleBlocksInOrder(sourceText, rules) {
+  const source = String(sourceText || "");
+  const matches = [];
+  for (const rule of rules) {
+    for (const match of findRuleMatchesOutsideOccupied(source, rule, [])) {
+      matches.push({
+        type: "rule",
+        rule,
+        key: getRuleKey(rule),
+        start: match.blockStart,
+        end: match.blockEnd,
+        content: source.slice(match.contentStart, match.contentEnd),
+        block: source.slice(match.blockStart, match.blockEnd),
+      });
+    }
+  }
+
+  matches.sort((a, b) => {
+    if (a.start !== b.start) return a.start - b.start;
+    return b.end - b.start - (a.end - a.start);
+  });
+
+  const selected = [];
+  let occupiedUntil = -1;
+  for (const match of matches) {
+    if (match.start < occupiedUntil) continue;
+    selected.push(match);
+    occupiedUntil = match.end;
+  }
+  return selected;
+}
+
+function reorderAndApplyRuleBlocks(sourceText, rules, replacements = {}) {
+  const source = String(sourceText || "");
+  const recognizedBlocks = collectRuleBlocksInOrder(source, rules);
+  const replacementMap =
+    replacements && typeof replacements === "object" ? replacements : {};
+  const lastExistingContentByKey = new Map();
+
+  for (const block of recognizedBlocks) {
+    lastExistingContentByKey.set(block.key, block.content);
+  }
+
   const orderedBlocks = [];
   for (const rule of rules) {
-    const block = getRuleFullBlock(sourceText, rule);
-    if (block) orderedBlocks.push(block.trim());
+    const key = getRuleKey(rule);
+    const hasReplacement = Object.prototype.hasOwnProperty.call(
+      replacementMap,
+      key,
+    );
+    const content = hasReplacement
+      ? replacementMap[key]
+      : lastExistingContentByKey.get(key);
+    if (hasReplacement && !normalizeReplacementContent(rule, content)) {
+      throw new Error(`格式检查返回的 ${key} 为空字符串，已拒绝清空标签内容`);
+    }
+    const block = buildRuleBlock(rule, content);
+    if (block) orderedBlocks.push({ key, rule, block });
   }
-  const remainder = removeRuleBlocks(sourceText, rules);
-  return [...orderedBlocks, remainder].filter(Boolean).join("\n");
+
+  if (!recognizedBlocks.length) {
+    if (!orderedBlocks.length) return source;
+    return [source.trim(), ...orderedBlocks.map((item) => item.block)]
+      .filter(Boolean)
+      .join("\n");
+  }
+
+  const output = [];
+  let cursor = 0;
+  let orderedIndex = 0;
+
+  for (let i = 0; i < recognizedBlocks.length; i++) {
+    const recognized = recognizedBlocks[i];
+    output.push(source.slice(cursor, recognized.start));
+    if (orderedIndex < orderedBlocks.length) {
+      output.push(orderedBlocks[orderedIndex].block);
+      orderedIndex += 1;
+    } else {
+      output.push(recognized.block);
+    }
+    cursor = recognized.end;
+
+    if (
+      i === recognizedBlocks.length - 1 &&
+      orderedIndex < orderedBlocks.length
+    ) {
+      const remainingBlocks = orderedBlocks
+        .slice(orderedIndex)
+        .map((item) => item.block)
+        .filter(Boolean)
+        .join("\n");
+      if (remainingBlocks) {
+        const previous = output.length
+          ? String(output[output.length - 1] || "")
+          : "";
+        if (previous && !/[\r\n]$/.test(previous)) {
+          output.push("\n");
+        }
+        output.push(remainingBlocks);
+      }
+      orderedIndex = orderedBlocks.length;
+    }
+  }
+
+  output.push(source.slice(cursor));
+  return output.join("");
 }
 
 function applyFormatReplacements(
@@ -2038,18 +2130,11 @@ function applyFormatReplacements(
   replacements,
   rules = getNonBodyFormatRules(settings),
 ) {
-  let result = sourceText;
-  for (const rule of rules) {
-    const key = getRuleKey(rule);
-    if (Object.prototype.hasOwnProperty.call(replacements, key)) {
-      const value = normalizeReplacementContent(rule, replacements[key]);
-      if (!value) {
-        throw new Error(`格式检查返回的 ${key} 为空字符串，已拒绝清空标签内容`);
-      }
-      result = replaceTaggedSegmentContent(result, rule, value);
-    }
-  }
-  return reorderFormatBlocks(result, getEnabledFormatRules(settings));
+  return reorderAndApplyRuleBlocks(
+    sourceText,
+    getEnabledFormatRules(settings),
+    replacements,
+  );
 }
 
 function getMissingFormatRules(sourceText, settings) {
