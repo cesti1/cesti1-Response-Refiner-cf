@@ -355,17 +355,24 @@ function migrateLegacySettings(settings) {
 }
 
 function migratePromptTemplates(settings) {
-  settings.refineSystemTemplate =
-    String(settings.refineSystemTemplate || "").trim() ||
-    DEFAULT_REFINE_SYSTEM_TEMPLATE;
+  if (settings.refineSystemTemplate === undefined) {
+    settings.refineSystemTemplate = DEFAULT_REFINE_SYSTEM_TEMPLATE;
+  } else {
+    settings.refineSystemTemplate = String(settings.refineSystemTemplate ?? "");
+  }
   if (settings.refineUserTemplate === undefined) {
     settings.refineUserTemplate = DEFAULT_REFINE_USER_TEMPLATE;
   } else {
     settings.refineUserTemplate = String(settings.refineUserTemplate ?? "");
   }
-  settings.formatReplacementSystemTemplate =
-    String(settings.formatReplacementSystemTemplate || "").trim() ||
-    DEFAULT_FORMAT_REPLACEMENT_SYSTEM_TEMPLATE;
+  if (settings.formatReplacementSystemTemplate === undefined) {
+    settings.formatReplacementSystemTemplate =
+      DEFAULT_FORMAT_REPLACEMENT_SYSTEM_TEMPLATE;
+  } else {
+    settings.formatReplacementSystemTemplate = String(
+      settings.formatReplacementSystemTemplate ?? "",
+    );
+  }
   if (settings.formatReplacementUserTemplate === undefined) {
     settings.formatReplacementUserTemplate =
       DEFAULT_FORMAT_REPLACEMENT_USER_TEMPLATE;
@@ -374,9 +381,13 @@ function migratePromptTemplates(settings) {
       settings.formatReplacementUserTemplate ?? "",
     );
   }
-  settings.formatFullSystemTemplate =
-    String(settings.formatFullSystemTemplate || "").trim() ||
-    DEFAULT_FORMAT_FULL_SYSTEM_TEMPLATE;
+  if (settings.formatFullSystemTemplate === undefined) {
+    settings.formatFullSystemTemplate = DEFAULT_FORMAT_FULL_SYSTEM_TEMPLATE;
+  } else {
+    settings.formatFullSystemTemplate = String(
+      settings.formatFullSystemTemplate ?? "",
+    );
+  }
   if (settings.formatFullUserTemplate === undefined) {
     settings.formatFullUserTemplate = DEFAULT_FORMAT_FULL_USER_TEMPLATE;
   } else {
@@ -384,23 +395,19 @@ function migratePromptTemplates(settings) {
       settings.formatFullUserTemplate ?? "",
     );
   }
-  settings.completionSystemTemplate =
-    String(settings.completionSystemTemplate || "").trim() ||
-    DEFAULT_COMPLETION_SYSTEM_TEMPLATE;
+  if (settings.completionSystemTemplate === undefined) {
+    settings.completionSystemTemplate = DEFAULT_COMPLETION_SYSTEM_TEMPLATE;
+  } else {
+    settings.completionSystemTemplate = String(
+      settings.completionSystemTemplate ?? "",
+    );
+  }
   if (settings.completionUserTemplate === undefined) {
     settings.completionUserTemplate = DEFAULT_COMPLETION_USER_TEMPLATE;
   } else {
     settings.completionUserTemplate = String(
       settings.completionUserTemplate ?? "",
     );
-  }
-
-  const completionSystem = String(settings.completionSystemTemplate || "");
-  if (
-    completionSystem.includes("全部格式标签规则：") ||
-    completionSystem.includes("补完依据：需要补完回复的上一条用户消息")
-  ) {
-    settings.completionSystemTemplate = DEFAULT_COMPLETION_SYSTEM_TEMPLATE;
   }
 }
 
@@ -1055,10 +1062,7 @@ function buildRefineMessages(sourceText, settings, isUser) {
     {
       role: "system",
       content: compactPromptText(
-        renderTemplate(
-          settings.refineSystemTemplate || DEFAULT_REFINE_SYSTEM_TEMPLATE,
-          values,
-        ),
+        renderTemplate(settings.refineSystemTemplate, values),
       ),
     },
     {
@@ -1588,7 +1592,6 @@ function groupModels(models) {
 }
 
 function updateModelSelect(providerKey = getProviderKey()) {
-  const settings = getSettings();
   const providerSettings = getProviderSettings(providerKey);
   const models = Array.isArray(providerSettings.models)
     ? providerSettings.models
@@ -1621,7 +1624,12 @@ function updateModelSelect(providerKey = getProviderKey()) {
     $select.val(providerSettings.model);
   }
   $manual.val(providerSettings.model || "");
-  settings.connectionType = providerKey;
+}
+
+function getActiveProviderKeyFromUi() {
+  return String(
+    $("#response_refiner_connection_type").val() || getProviderKey(),
+  );
 }
 
 async function refreshProviderModels() {
@@ -1669,6 +1677,7 @@ function updateConnectionTypeUI() {
     .attr("placeholder", provider.endpointPlaceholder)
     .val(displayEndpoint);
   $("#response_refiner_api_key_input").val(providerSettings.apiKey || "");
+  $("#response_refiner_model_manual").val(providerSettings.model || "");
   updateModelSelect(providerKey);
 }
 
@@ -3404,7 +3413,10 @@ function updateBasicSettingsInputs() {
     settings.features.completionEnabled,
   );
   $("#response_refiner_refine_system_template").val(
-    settings.refineSystemTemplate || DEFAULT_REFINE_SYSTEM_TEMPLATE,
+    getSettingValue(
+      settings.refineSystemTemplate,
+      DEFAULT_REFINE_SYSTEM_TEMPLATE,
+    ),
   );
   $("#response_refiner_prompt").val(settings.prompt);
   $("#response_refiner_user_prompt").val(settings.userPrompt);
@@ -3412,15 +3424,20 @@ function updateBasicSettingsInputs() {
   $("#response_refiner_filter_enabled").prop("checked", settings.filterEnabled);
   $("#response_refiner_filter_regex").val(settings.filterRegex);
   $("#response_refiner_format_replacement_system_template").val(
-    settings.formatReplacementSystemTemplate ||
+    getSettingValue(
+      settings.formatReplacementSystemTemplate,
       DEFAULT_FORMAT_REPLACEMENT_SYSTEM_TEMPLATE,
+    ),
   );
   $("#response_refiner_completion_chain_regex").val(
     settings.completionChainRegex || settings.completionOutlineRegex || "",
   );
   $("#response_refiner_completion_prompt").val(settings.completionPrompt);
   $("#response_refiner_completion_system_template").val(
-    settings.completionSystemTemplate || DEFAULT_COMPLETION_SYSTEM_TEMPLATE,
+    getSettingValue(
+      settings.completionSystemTemplate,
+      DEFAULT_COMPLETION_SYSTEM_TEMPLATE,
+    ),
   );
   $("#response_refiner_refine_user_template").val(
     getSettingValue(settings.refineUserTemplate, DEFAULT_REFINE_USER_TEMPLATE),
@@ -3608,7 +3625,7 @@ function bindSettings() {
     });
 
   $("#response_refiner_endpoint").on("input", function () {
-    const providerKey = getProviderKey();
+    const providerKey = getActiveProviderKeyFromUi();
     const provider = PROVIDERS[providerKey];
     const value = String($(this).val());
     getProviderSettings(providerKey).endpoint =
@@ -3622,21 +3639,25 @@ function bindSettings() {
   $("#response_refiner_model_select").on("change", function () {
     const value = String($(this).val() || "");
     if (value) {
-      getProviderSettings().model = value;
+      getProviderSettings(getActiveProviderKeyFromUi()).model = value;
       $("#response_refiner_model_manual").val(value);
       saveSettings();
     }
   });
 
   $("#response_refiner_model_manual").on("input", function () {
-    getProviderSettings().model = String($(this).val());
+    getProviderSettings(getActiveProviderKeyFromUi()).model = String(
+      $(this).val(),
+    );
     saveSettings();
   });
 
   $("#response_refiner_refresh_models").on("click", refreshProviderModels);
 
   $("#response_refiner_api_key_input").on("input", function () {
-    getProviderSettings().apiKey = String($(this).val()).trim();
+    getProviderSettings(getActiveProviderKeyFromUi()).apiKey = String(
+      $(this).val(),
+    ).trim();
     saveSettings();
   });
 
@@ -3678,10 +3699,14 @@ function bindSettings() {
     });
 
   $("#response_refiner_refine_system_template")
-    .val(settings.refineSystemTemplate || DEFAULT_REFINE_SYSTEM_TEMPLATE)
+    .val(
+      getSettingValue(
+        settings.refineSystemTemplate,
+        DEFAULT_REFINE_SYSTEM_TEMPLATE,
+      ),
+    )
     .on("input", function () {
-      settings.refineSystemTemplate =
-        String($(this).val()) || DEFAULT_REFINE_SYSTEM_TEMPLATE;
+      settings.refineSystemTemplate = String($(this).val());
       saveSettings();
       updatePromptPreview();
     });
@@ -3765,11 +3790,13 @@ function bindSettings() {
     });
   $("#response_refiner_completion_system_template")
     .val(
-      settings.completionSystemTemplate || DEFAULT_COMPLETION_SYSTEM_TEMPLATE,
+      getSettingValue(
+        settings.completionSystemTemplate,
+        DEFAULT_COMPLETION_SYSTEM_TEMPLATE,
+      ),
     )
     .on("input", function () {
-      settings.completionSystemTemplate =
-        String($(this).val()) || DEFAULT_COMPLETION_SYSTEM_TEMPLATE;
+      settings.completionSystemTemplate = String($(this).val());
       saveSettings();
       updatePromptPreview();
     });
@@ -3787,12 +3814,13 @@ function bindSettings() {
     });
   $("#response_refiner_format_replacement_system_template")
     .val(
-      settings.formatReplacementSystemTemplate ||
+      getSettingValue(
+        settings.formatReplacementSystemTemplate,
         DEFAULT_FORMAT_REPLACEMENT_SYSTEM_TEMPLATE,
+      ),
     )
     .on("input", function () {
-      settings.formatReplacementSystemTemplate =
-        String($(this).val()) || DEFAULT_FORMAT_REPLACEMENT_SYSTEM_TEMPLATE;
+      settings.formatReplacementSystemTemplate = String($(this).val());
       saveSettings();
       updatePromptPreview();
     });
