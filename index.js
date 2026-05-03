@@ -358,15 +358,26 @@ function migratePromptTemplates(settings) {
   settings.refineSystemTemplate =
     String(settings.refineSystemTemplate || "").trim() ||
     DEFAULT_REFINE_SYSTEM_TEMPLATE;
+  settings.refineUserTemplate =
+    String(settings.refineUserTemplate || "") || DEFAULT_REFINE_USER_TEMPLATE;
   settings.formatReplacementSystemTemplate =
     String(settings.formatReplacementSystemTemplate || "").trim() ||
     DEFAULT_FORMAT_REPLACEMENT_SYSTEM_TEMPLATE;
+  settings.formatReplacementUserTemplate =
+    String(settings.formatReplacementUserTemplate || "") ||
+    DEFAULT_FORMAT_REPLACEMENT_USER_TEMPLATE;
   settings.formatFullSystemTemplate =
     String(settings.formatFullSystemTemplate || "").trim() ||
     DEFAULT_FORMAT_FULL_SYSTEM_TEMPLATE;
+  settings.formatFullUserTemplate =
+    String(settings.formatFullUserTemplate || "") ||
+    DEFAULT_FORMAT_FULL_USER_TEMPLATE;
   settings.completionSystemTemplate =
     String(settings.completionSystemTemplate || "").trim() ||
     DEFAULT_COMPLETION_SYSTEM_TEMPLATE;
+  settings.completionUserTemplate =
+    String(settings.completionUserTemplate || "") ||
+    DEFAULT_COMPLETION_USER_TEMPLATE;
 
   const formatUser = String(settings.formatReplacementUserTemplate || "");
   if (
@@ -412,6 +423,10 @@ function getProviderSettings(providerKey = getProviderKey()) {
   settings.providers[providerKey] =
     settings.providers[providerKey] ||
     deepClone(DEFAULT_PROVIDER_SETTINGS[providerKey]);
+  mergeDefaults(
+    settings.providers[providerKey],
+    DEFAULT_PROVIDER_SETTINGS[providerKey],
+  );
   return settings.providers[providerKey];
 }
 
@@ -433,8 +448,42 @@ function getApiEndpoint() {
   const providerKey = getProviderKey();
   const provider = PROVIDERS[providerKey];
   const providerSettings = getProviderSettings(providerKey);
-  return normalizeEndpoint(
-    providerSettings.endpoint || provider.defaultEndpoint || "",
+  const endpoint = normalizeEndpoint(providerSettings.endpoint);
+  if (endpoint) {
+    return endpoint;
+  }
+  if (providerKey === "direct") {
+    return "";
+  }
+  return normalizeEndpoint(provider.defaultEndpoint || "");
+}
+
+function getSettingValue(value, fallback = "") {
+  const normalized = String(value ?? "");
+  return normalized.trim() ? normalized : fallback;
+}
+
+function syncStructureTemplateInputs(settings = getSettings()) {
+  $("#response_refiner_refine_user_template").val(
+    getSettingValue(settings.refineUserTemplate, DEFAULT_REFINE_USER_TEMPLATE),
+  );
+  $("#response_refiner_format_replacement_user_template").val(
+    getSettingValue(
+      settings.formatReplacementUserTemplate,
+      DEFAULT_FORMAT_REPLACEMENT_USER_TEMPLATE,
+    ),
+  );
+  $("#response_refiner_format_full_user_template").val(
+    getSettingValue(
+      settings.formatFullUserTemplate,
+      DEFAULT_FORMAT_FULL_USER_TEMPLATE,
+    ),
+  );
+  $("#response_refiner_completion_user_template").val(
+    getSettingValue(
+      settings.completionUserTemplate,
+      DEFAULT_COMPLETION_USER_TEMPLATE,
+    ),
   );
 }
 
@@ -1623,11 +1672,17 @@ function updateConnectionTypeUI() {
   const providerKey = getProviderKey();
   const provider = PROVIDERS[providerKey];
   const providerSettings = getProviderSettings(providerKey);
+  const endpointValue = normalizeEndpoint(providerSettings.endpoint);
+  const displayEndpoint =
+    endpointValue ||
+    (providerKey === "direct"
+      ? ""
+      : normalizeEndpoint(provider.defaultEndpoint || ""));
 
   setText($("#response_refiner_endpoint_label"), provider.endpointLabel);
   $("#response_refiner_endpoint")
     .attr("placeholder", provider.endpointPlaceholder)
-    .val(providerSettings.endpoint || provider.defaultEndpoint || "");
+    .val(displayEndpoint);
   $("#response_refiner_api_key_input").val(providerSettings.apiKey || "");
   updateModelSelect(providerKey);
 }
@@ -3554,7 +3609,14 @@ function bindSettings() {
     });
 
   $("#response_refiner_endpoint").on("input", function () {
-    getProviderSettings().endpoint = String($(this).val());
+    const providerKey = getProviderKey();
+    const provider = PROVIDERS[providerKey];
+    const value = String($(this).val());
+    getProviderSettings(providerKey).endpoint =
+      providerKey === "direct" ? value : normalizeEndpoint(value);
+    if (providerKey !== "direct" && !normalizeEndpoint(value)) {
+      $(this).val(provider.defaultEndpoint || "");
+    }
     saveSettings();
   });
 
@@ -3713,10 +3775,14 @@ function bindSettings() {
       updatePromptPreview();
     });
   $("#response_refiner_refine_user_template")
-    .val(settings.refineUserTemplate || DEFAULT_REFINE_USER_TEMPLATE)
+    .val(
+      getSettingValue(
+        settings.refineUserTemplate,
+        DEFAULT_REFINE_USER_TEMPLATE,
+      ),
+    )
     .on("input", function () {
-      settings.refineUserTemplate =
-        String($(this).val()) || DEFAULT_REFINE_USER_TEMPLATE;
+      settings.refineUserTemplate = String($(this).val());
       saveSettings();
       updatePromptPreview();
     });
@@ -3733,28 +3799,37 @@ function bindSettings() {
     });
   $("#response_refiner_format_replacement_user_template")
     .val(
-      settings.formatReplacementUserTemplate ||
+      getSettingValue(
+        settings.formatReplacementUserTemplate,
         DEFAULT_FORMAT_REPLACEMENT_USER_TEMPLATE,
+      ),
     )
     .on("input", function () {
-      settings.formatReplacementUserTemplate =
-        String($(this).val()) || DEFAULT_FORMAT_REPLACEMENT_USER_TEMPLATE;
+      settings.formatReplacementUserTemplate = String($(this).val());
       saveSettings();
       updatePromptPreview();
     });
   $("#response_refiner_format_full_user_template")
-    .val(settings.formatFullUserTemplate || DEFAULT_FORMAT_FULL_USER_TEMPLATE)
+    .val(
+      getSettingValue(
+        settings.formatFullUserTemplate,
+        DEFAULT_FORMAT_FULL_USER_TEMPLATE,
+      ),
+    )
     .on("input", function () {
-      settings.formatFullUserTemplate =
-        String($(this).val()) || DEFAULT_FORMAT_FULL_USER_TEMPLATE;
+      settings.formatFullUserTemplate = String($(this).val());
       saveSettings();
       updatePromptPreview();
     });
   $("#response_refiner_completion_user_template")
-    .val(settings.completionUserTemplate || DEFAULT_COMPLETION_USER_TEMPLATE)
+    .val(
+      getSettingValue(
+        settings.completionUserTemplate,
+        DEFAULT_COMPLETION_USER_TEMPLATE,
+      ),
+    )
     .on("input", function () {
-      settings.completionUserTemplate =
-        String($(this).val()) || DEFAULT_COMPLETION_USER_TEMPLATE;
+      settings.completionUserTemplate = String($(this).val());
       saveSettings();
       updatePromptPreview();
     });
@@ -3781,6 +3856,7 @@ function bindSettings() {
   });
 
   populateExtractPromptInputs();
+  syncStructureTemplateInputs(settings);
   $(
     "#response_refiner_extract_rules_prompt, #response_refiner_extract_chain_rule_prompt",
   ).on("input", syncExtractPromptSettingsFromDom);
