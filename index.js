@@ -358,26 +358,42 @@ function migratePromptTemplates(settings) {
   settings.refineSystemTemplate =
     String(settings.refineSystemTemplate || "").trim() ||
     DEFAULT_REFINE_SYSTEM_TEMPLATE;
-  settings.refineUserTemplate =
-    String(settings.refineUserTemplate || "") || DEFAULT_REFINE_USER_TEMPLATE;
+  if (settings.refineUserTemplate === undefined) {
+    settings.refineUserTemplate = DEFAULT_REFINE_USER_TEMPLATE;
+  } else {
+    settings.refineUserTemplate = String(settings.refineUserTemplate ?? "");
+  }
   settings.formatReplacementSystemTemplate =
     String(settings.formatReplacementSystemTemplate || "").trim() ||
     DEFAULT_FORMAT_REPLACEMENT_SYSTEM_TEMPLATE;
-  settings.formatReplacementUserTemplate =
-    String(settings.formatReplacementUserTemplate || "") ||
-    DEFAULT_FORMAT_REPLACEMENT_USER_TEMPLATE;
+  if (settings.formatReplacementUserTemplate === undefined) {
+    settings.formatReplacementUserTemplate =
+      DEFAULT_FORMAT_REPLACEMENT_USER_TEMPLATE;
+  } else {
+    settings.formatReplacementUserTemplate = String(
+      settings.formatReplacementUserTemplate ?? "",
+    );
+  }
   settings.formatFullSystemTemplate =
     String(settings.formatFullSystemTemplate || "").trim() ||
     DEFAULT_FORMAT_FULL_SYSTEM_TEMPLATE;
-  settings.formatFullUserTemplate =
-    String(settings.formatFullUserTemplate || "") ||
-    DEFAULT_FORMAT_FULL_USER_TEMPLATE;
+  if (settings.formatFullUserTemplate === undefined) {
+    settings.formatFullUserTemplate = DEFAULT_FORMAT_FULL_USER_TEMPLATE;
+  } else {
+    settings.formatFullUserTemplate = String(
+      settings.formatFullUserTemplate ?? "",
+    );
+  }
   settings.completionSystemTemplate =
     String(settings.completionSystemTemplate || "").trim() ||
     DEFAULT_COMPLETION_SYSTEM_TEMPLATE;
-  settings.completionUserTemplate =
-    String(settings.completionUserTemplate || "") ||
-    DEFAULT_COMPLETION_USER_TEMPLATE;
+  if (settings.completionUserTemplate === undefined) {
+    settings.completionUserTemplate = DEFAULT_COMPLETION_USER_TEMPLATE;
+  } else {
+    settings.completionUserTemplate = String(
+      settings.completionUserTemplate ?? "",
+    );
+  }
 
   const completionSystem = String(settings.completionSystemTemplate || "");
   if (
@@ -441,8 +457,8 @@ function getApiEndpoint() {
 }
 
 function getSettingValue(value, fallback = "") {
-  const normalized = String(value ?? "");
-  return normalized.trim() ? normalized : fallback;
+  if (value === undefined) return fallback;
+  return String(value ?? "");
 }
 
 function syncStructureTemplateInputs(settings = getSettings()) {
@@ -1047,10 +1063,7 @@ function buildRefineMessages(sourceText, settings, isUser) {
     },
     {
       role: "user",
-      content: renderTemplate(
-        settings.refineUserTemplate || DEFAULT_REFINE_USER_TEMPLATE,
-        values,
-      ),
+      content: renderTemplate(settings.refineUserTemplate, values),
     },
   ];
 }
@@ -1072,11 +1085,7 @@ function buildFormatMessages(sourceText, settings, replacementOnly = false) {
       {
         role: "user",
         content: compactPromptText(
-          renderTemplate(
-            settings.formatReplacementUserTemplate ||
-              DEFAULT_FORMAT_REPLACEMENT_USER_TEMPLATE,
-            values,
-          ),
+          renderTemplate(settings.formatReplacementUserTemplate, values),
         ),
       },
     ];
@@ -1096,10 +1105,7 @@ function buildFormatMessages(sourceText, settings, replacementOnly = false) {
     },
     {
       role: "user",
-      content: renderTemplate(
-        settings.formatFullUserTemplate || DEFAULT_FORMAT_FULL_USER_TEMPLATE,
-        values,
-      ),
+      content: renderTemplate(settings.formatFullUserTemplate, values),
     },
   ];
 }
@@ -1225,10 +1231,7 @@ function buildCompletionMessages(
     {
       role: "user",
       content: compactPromptText(
-        renderTemplate(
-          settings.completionUserTemplate || DEFAULT_COMPLETION_USER_TEMPLATE,
-          values,
-        ),
+        renderTemplate(settings.completionUserTemplate, values),
       ),
     },
   ];
