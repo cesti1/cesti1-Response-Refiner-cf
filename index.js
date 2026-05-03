@@ -1311,6 +1311,8 @@ async function callAI(messages, options = {}) {
   const signal = options.signal;
   const onToken =
     typeof options.onToken === "function" ? options.onToken : null;
+  const onStreamEvent =
+    typeof options.onStreamEvent === "function" ? options.onStreamEvent : null;
   const stream = Boolean(options.stream && onToken);
 
   if (!endpoint || !model) {
@@ -1357,6 +1359,7 @@ async function callAI(messages, options = {}) {
     signal,
     stream,
     onToken,
+    onStreamEvent,
   );
 }
 
@@ -1425,6 +1428,7 @@ async function callOpenAICompatible(
   signal,
   stream = false,
   onToken = null,
+  onStreamEvent = null,
 ) {
   const payload = {
     model,
@@ -1461,7 +1465,7 @@ async function callOpenAICompatible(
   });
 
   if (stream && response.ok && response.body) {
-    return readOpenAIStream(response, onToken, providerKey);
+    return readOpenAIStream(response, onToken, providerKey, onStreamEvent);
   }
 
   const data = await safeJson(response);
@@ -1484,11 +1488,69 @@ async function readOpenAIStream(
   response,
   onToken,
   providerKey = "openai-compatible",
+  onStreamEvent = null,
 ) {
   const reader = response.body.getReader();
   const decoder = new TextDecoder("utf-8");
   let buffer = "";
   let result = "";
+
+  function collectStreamText(value) {
+    if (typeof value === "string") return [value];
+    if (Array.isArray(value)) {
+      return value.flatMap((item) => collectStreamText(item)).filter(Boolean);
+    }
+    if (value && typeof value === "object") {
+      return [
+        ...collectStreamText(value.text),
+        ...collectStreamText(value.content),
+        ...collectStreamText(value.reasoning),
+        ...collectStreamText(value.reasoning_content),
+        ...collectStreamText(value.thinking),
+      ].filter(Boolean);
+    }
+    return [];
+  }
+
+  function extractStreamPayload(data) {
+    const choice = data?.choices?.[0] || {};
+    const delta = choice?.delta || {};
+    const message = choice?.message || {};
+    const content = [
+      ...collectStreamText(delta.content),
+      ...collectStreamText(choice.text),
+      ...collectStreamText(message.content),
+    ]
+      .filter(Boolean)
+      .join("");
+    const thinking = [
+      ...collectStreamText(delta.reasoning),
+      ...collectStreamText(delta.reasoning_content),
+      ...collectStreamText(delta.thinking),
+      ...collectStreamText(choice.reasoning),
+      ...collectStreamText(choice.reasoning_content),
+      ...collectStreamText(choice.thinking),
+      ...collectStreamText(message.reasoning),
+      ...collectStreamText(message.reasoning_content),
+      ...collectStreamText(message.thinking),
+      ...collectStreamText(data.reasoning),
+      ...collectStreamText(data.reasoning_content),
+      ...collectStreamText(data.thinking),
+    ]
+      .filter(Boolean)
+      .join("");
+    return {
+      content,
+      thinking,
+      hasActivity: Boolean(
+        content ||
+        thinking ||
+        choice?.finish_reason ||
+        Object.keys(delta).length,
+      ),
+    };
+  }
+
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
@@ -1503,8 +1565,20 @@ async function readOpenAIStream(
       try {
         const data = JSON.parse(payload);
         logApiStreamChunk(providerKey, data);
-        const token =
-          data?.choices?.[0]?.delta?.content || data?.choices?.[0]?.text || "";
+        const streamPayload = extractStreamPayload(data);
+        if (streamPayload.hasActivity) {
+          onStreamEvent?.({
+            type: streamPayload.thinking
+              ? "thinking"
+              : streamPayload.content
+                ? "content"
+                : "activity",
+            text: streamPayload.thinking || streamPayload.content || "",
+            providerKey,
+            chunk: data,
+          });
+        }
+        const token = streamPayload.content;
         if (token) {
           result += token;
           onToken?.(token);
@@ -1889,6 +1963,7 @@ async function runRefine(
   signal,
   onToken = null,
   onStatus = null,
+  onStreamEvent = null,
 ) {
   const textToRefine = isUser
     ? originalText
@@ -1899,6 +1974,7 @@ async function runRefine(
     signal,
     stream: settings.streamStatusEnabled,
     onToken,
+    onStreamEvent,
   });
   const finalText = isUser
     ? refinedText
@@ -2016,6 +2092,48 @@ function buildRuleBlock(rule, content) {
   return `${start}${value.startsWith("\n") ? "" : "\n"}${value}${value.endsWith("\n") ? "" : "\n"}${rule.endTag}`;
 }
 
+function summarizeRuleBlockOrder(sourceText, rules) {
+  const recognizedBlocks = collectRuleBlocksInOrder(sourceText, rules);
+  if (!recognizedBlocks.length) return "未识别到规则内标签块。";
+  return recognizedBlocks
+    .map(
+      (block, index) =>
+        `${index + 1}. ${block.rule.name || block.key}｜规则ID=${block.key}｜范围=[${block.start}, ${block.end})`,
+    )
+    .join("\n");
+}
+
+function summarizeExpectedRuleOrder(rules, sourceText, replacements = null) {
+  const recognizedBlocks = collectRuleBlocksInOrder(sourceText, rules);
+  const existingKeys = new Set(recognizedBlocks.map((block) => block.key));
+  const replacementMap =
+    replacements && typeof replacements === "object" ? replacements : {};
+  const lines = [];
+  let index = 0;
+  for (const rule of rules) {
+    const key = getRuleKey(rule);
+    const hasReplacement = Object.prototype.hasOwnProperty.call(
+      replacementMap,
+      key,
+    );
+    if (!existingKeys.has(key) && !hasReplacement) continue;
+    index += 1;
+    lines.push(
+      `${index}. ${rule.name || key}｜规则ID=${key}${hasReplacement && !existingKeys.has(key) ? "｜缺失后补入" : ""}`,
+    );
+  }
+  return lines.length ? lines.join("\n") : "无可重排规则块。";
+}
+
+function buildFormatDebugInfo(sourceText, settings, replacements = null) {
+  const rules = getEnabledFormatRules(settings);
+  return {
+    beforeOrder: summarizeRuleBlockOrder(sourceText, rules),
+    slotSummary: summarizeRuleBlockOrder(sourceText, rules),
+    afterOrder: summarizeExpectedRuleOrder(rules, sourceText, replacements),
+  };
+}
+
 function collectRuleBlocksInOrder(sourceText, rules) {
   const source = String(sourceText || "");
   const matches = [];
@@ -2124,6 +2242,16 @@ function reorderAndApplyRuleBlocks(sourceText, rules, replacements = {}) {
   return output.join("");
 }
 
+function normalizeFormatFullResponse(sourceText, formattedText, settings) {
+  const candidate = String(formattedText || "");
+  if (!candidate.trim()) return String(sourceText || "");
+  return reorderAndApplyRuleBlocks(
+    candidate,
+    getEnabledFormatRules(settings),
+    {},
+  );
+}
+
 function applyFormatReplacements(
   sourceText,
   settings,
@@ -2151,22 +2279,34 @@ async function runFormat(
   replacementOnly = true,
   onToken = null,
   onStatus = null,
+  onStreamEvent = null,
 ) {
   if (!replacementOnly) {
     const messages = buildFormatMessages(sourceText, settings);
+    const debugInfo = buildFormatDebugInfo(sourceText, settings);
     onStatus?.(
       `完整的实际发送提示词：\n${formatMessagesForStatus(messages)}\n`,
+    );
+    onStatus?.(
+      `标签重排调试（原文命中顺序）：\n${debugInfo.beforeOrder}\n\n命中的规则槽位：\n${debugInfo.slotSummary}\n\n预期规则顺序：\n${debugInfo.afterOrder}\n`,
     );
     const formattedText = await callAI(messages, {
       signal,
       stream: settings.streamStatusEnabled,
       onToken,
+      onStreamEvent,
     });
+    const normalizedText = normalizeFormatFullResponse(
+      sourceText,
+      formattedText,
+      settings,
+    );
     return {
       stage: "format",
       original_text: sourceText,
       refined_text: formattedText,
-      candidate_text: formattedText,
+      candidate_text: normalizedText,
+      debug_info: debugInfo,
     };
   }
 
@@ -2180,14 +2320,24 @@ async function runFormat(
     };
   }
   const messages = buildFormatMessages(sourceText, settings, true);
+  const debugInfo = buildFormatDebugInfo(sourceText, settings);
   onStatus?.(`完整的实际发送提示词：\n${formatMessagesForStatus(messages)}\n`);
+  onStatus?.(
+    `标签重排调试（原文命中顺序）：\n${debugInfo.beforeOrder}\n\n命中的规则槽位：\n${debugInfo.slotSummary}\n\n预期规则顺序：\n${debugInfo.afterOrder}\n`,
+  );
   onToken = onToken || null;
   const replacementText = await callAI(messages, {
     signal,
     stream: settings.streamStatusEnabled,
     onToken,
+    onStreamEvent,
   });
   const replacements = parseFormatReplacementOutput(replacementText);
+  const replacementDebugInfo = buildFormatDebugInfo(
+    sourceText,
+    settings,
+    replacements,
+  );
   const formattedText = applyFormatReplacements(
     sourceText,
     settings,
@@ -2199,6 +2349,7 @@ async function runFormat(
     original_text: sourceText,
     refined_text: JSON.stringify(replacements, null, 2),
     candidate_text: formattedText,
+    debug_info: replacementDebugInfo,
   };
 }
 
@@ -2230,6 +2381,7 @@ async function runCompletion(
   onToken = null,
   missingRules = [],
   onStatus = null,
+  onStreamEvent = null,
 ) {
   const plan = buildCompletionPlan(sourceText, settings, missingRules);
   onStatus?.(
@@ -2248,6 +2400,7 @@ async function runCompletion(
     signal,
     stream: settings.streamStatusEnabled,
     onToken,
+    onStreamEvent,
   });
   onStatus?.(
     `模型返回补完片段，长度 ${String(continuation || "").length} 字符。\n`,
@@ -2375,6 +2528,7 @@ function runStageWithStatus(messageId, stage, fn) {
   appendStatus(messageId, stage, "正在构建提示词并发送请求，等待模型返回...\n");
   startStatusHeartbeat(messageId, stage, startedAt, () => lastActivityAt);
   let outputStarted = false;
+  let thinkingStarted = false;
   const onToken = (token) => {
     markActivity();
     if (!outputStarted) {
@@ -2383,11 +2537,26 @@ function runStageWithStatus(messageId, stage, fn) {
     }
     appendStatus(messageId, stage, token, false, "", { timestamp: false });
   };
+  const onStreamEvent = (event) => {
+    markActivity();
+    if (!event || typeof event !== "object") return;
+    if (event.type === "thinking") {
+      if (!thinkingStarted) {
+        thinkingStarted = true;
+        appendStatus(messageId, stage, "模型思考中：\n");
+      }
+      if (event.text) {
+        appendStatus(messageId, stage, event.text, false, "", {
+          timestamp: false,
+        });
+      }
+    }
+  };
   const onStatus = (text) => {
     markActivity();
     appendStatus(messageId, stage, text);
   };
-  return fn(onToken, onStatus)
+  return fn(onToken, onStatus, onStreamEvent)
     .then((result) => {
       stopStatusHeartbeat(messageId);
       appendStatus(
@@ -2644,10 +2813,12 @@ async function requestFeature(messageId, feature) {
         refined_text: last?.refined_text || workingText,
         full_original_text: fullOriginalText,
         candidate_text: workingText,
+        debug_info: last?.debug_info || null,
         applied: false,
         created_at: Date.now(),
       },
       candidate_text: workingText,
+      debug_info: last?.debug_info || null,
       applied: false,
     };
 
@@ -2925,6 +3096,23 @@ function renderInlinePreview($container, refinerData) {
   );
   $grid.append($left, $right);
   $content.append($grid);
+  if (refinerData?.debug_info) {
+    const debugText = [
+      "标签重排调试信息",
+      `重排前标签序列：\n${refinerData.debug_info.beforeOrder || "无"}`,
+      `命中的规则槽位：\n${refinerData.debug_info.slotSummary || "无"}`,
+      `预期重排后标签序列：\n${refinerData.debug_info.afterOrder || "无"}`,
+    ].join("\n\n");
+    $content.append(
+      $("<div>").append(
+        $("<div>", {
+          class: "response-refiner-preview-title",
+          text: "功能2 调试信息",
+        }),
+        $("<div>", { class: "response-refiner-preview-text" }).text(debugText),
+      ),
+    );
+  }
   $preview.append($label, $content);
   $container.after($preview);
 
@@ -3401,6 +3589,7 @@ function buildPromptPreviewBlocks(sourceText, isUser) {
   const settings = getSettings();
   const source = sourceText || "【这里是待处理文本】";
   const textToRefine = isUser ? source : extractTextToRefine(source, settings);
+  const formatDebug = buildFormatDebugInfo(source, settings);
   return {
     refine: formatPromptMessagesForPreview(
       "功能1 润色",
@@ -3409,6 +3598,10 @@ function buildPromptPreviewBlocks(sourceText, isUser) {
     format: isUser
       ? "## 功能2 格式检查和补全修正\n用户输入不执行格式检查。"
       : [
+          "## 功能2 标签重排调试预览",
+          `### 重排前标签序列\n${formatDebug.beforeOrder}`,
+          `### 命中的规则槽位\n${formatDebug.slotSummary}`,
+          `### 预期重排后标签序列\n${formatDebug.afterOrder}`,
           formatPromptMessagesForPreview(
             "功能2 格式检查和补全修正（当前默认执行模式：仅非正文标签，返回替换 JSON）",
             buildFormatMessages(source, settings, true),
